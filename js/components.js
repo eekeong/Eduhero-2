@@ -124,7 +124,10 @@ const ui = {
         }
 
         // Build watermark after next tick so the DOM is ready
-        setTimeout(() => ui.applyVideoWatermark(videoId), 200);
+        setTimeout(() => {
+            ui.applyVideoWatermark(videoId);
+            ui.checkVideoConnectivity(embedUrl, videoId);
+        }, 200);
 
         return `
             <div id="video-wrapper-${videoId}" class="video-container bg-black rounded-lg shadow-md relative w-full aspect-video overflow-hidden group">
@@ -144,6 +147,56 @@ const ui = {
                 </div>
             </div>
         `;
+    },
+
+    checkVideoConnectivity(url, videoId) {
+        try {
+            const urlObj = new URL(url);
+            const controller = new AbortController();
+            const timeoutId = setTimeout(() => controller.abort(), 8000); // 8 seconds timeout
+
+            // Fetch with no-cors to test network reachability. It will fail on ERR_TIMED_OUT or Blocked by extension.
+            fetch(urlObj.origin + '/?ping=' + Date.now(), { mode: 'no-cors', cache: 'no-store', signal: controller.signal })
+                .then(() => clearTimeout(timeoutId))
+                .catch(() => this.showVideoFallback(videoId));
+        } catch(e) {}
+    },
+
+    showVideoFallback(videoId) {
+        const wrapper = document.getElementById(`video-wrapper-${videoId}`);
+        if (!wrapper) return;
+        
+        const fallbackId = `video-fallback-${videoId}`;
+        if (document.getElementById(fallbackId)) return;
+
+        const fallback = document.createElement('div');
+        fallback.id = fallbackId;
+        fallback.className = 'absolute inset-0 z-50 flex items-center justify-center bg-gray-900 backdrop-blur-md';
+        fallback.innerHTML = `
+            <div class="text-center p-6 max-w-md animate-fade-in">
+                <div class="w-16 h-16 bg-red-100/10 border border-red-500/30 rounded-full flex items-center justify-center mx-auto mb-4">
+                    <i class="fas fa-ban text-3xl text-red-500"></i>
+                </div>
+                <h3 class="text-white font-bold text-lg mb-2">Video Blocked by Browser or Network</h3>
+                <p class="text-gray-400 text-sm mb-5">Your browser's privacy settings, AdBlocker, or your Wi-Fi network has blocked the video player.</p>
+                
+                <div class="bg-gray-800/80 border border-gray-700 rounded-xl p-4 text-left text-xs text-gray-300 space-y-3">
+                    <div class="flex items-start gap-3">
+                        <i class="fas fa-shield-alt text-emerald-500 mt-0.5"></i>
+                        <div><strong class="text-white block mb-0.5">Fix 1: Turn off Tracking Prevention</strong>Click the Lock 🔒 or Shield 🛡️ icon in the address bar and turn off Tracking Prevention for this site.</div>
+                    </div>
+                    <div class="flex items-start gap-3">
+                        <i class="fas fa-ad text-emerald-500 mt-0.5"></i>
+                        <div><strong class="text-white block mb-0.5">Fix 2: Pause AdBlockers</strong>Disable any adblocker extensions and refresh.</div>
+                    </div>
+                    <div class="flex items-start gap-3">
+                        <i class="fas fa-wifi text-emerald-500 mt-0.5"></i>
+                        <div><strong class="text-white block mb-0.5">Fix 3: Change Network</strong>Connect to a Mobile Hotspot instead of Home Wi-Fi.</div>
+                    </div>
+                </div>
+            </div>
+        `;
+        wrapper.appendChild(fallback);
     },
 
     toggleVideoFullscreen(videoId) {
