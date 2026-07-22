@@ -4,7 +4,7 @@ const ui = {
     showToast(message, type = 'success') {
         const container = document.getElementById('toast-container');
         const toast = document.createElement('div');
-        
+
         // Clean message: Remove "Firebase:" and format technical codes
         let cleanMsg = message || '';
         if (typeof cleanMsg === 'string') {
@@ -36,7 +36,7 @@ const ui = {
                 <i class="fas fa-times text-current"></i>
             </button>
         `;
-        
+
         container.appendChild(toast);
         setTimeout(() => {
             if (toast.parentElement) {
@@ -77,7 +77,7 @@ const ui = {
     // Convert BunnyStream video data to embed URL
     getEmbedUrl(video) {
         if (!video) return '';
-        
+
         // Use BunnyStream provider
         if (video.bunnyLibraryId && video.bunnyVideoId) {
             // Disable native fullscreen button to protect watermark (students must use our custom FS button)
@@ -100,11 +100,11 @@ const ui = {
 
     getVideoThumbnail(video) {
         if (!video) return '';
-        
+
         if (video.bunnyLibraryId && video.bunnyVideoId) {
             return `https://iframe.mediadelivery.net/embed/${video.bunnyLibraryId}/${video.bunnyVideoId}/thumbnail.jpg`;
         }
-        
+
         return 'https://via.placeholder.com/320x180.png?text=Video';
     },
 
@@ -159,13 +159,13 @@ const ui = {
             fetch(urlObj.origin + '/?ping=' + Date.now(), { mode: 'no-cors', cache: 'no-store', signal: controller.signal })
                 .then(() => clearTimeout(timeoutId))
                 .catch(() => this.showVideoFallback(videoId));
-        } catch(e) {}
+        } catch (e) { }
     },
 
     showVideoFallback(videoId) {
         const wrapper = document.getElementById(`video-wrapper-${videoId}`);
         if (!wrapper) return;
-        
+
         const fallbackId = `video-fallback-${videoId}`;
         if (document.getElementById(fallbackId)) return;
 
@@ -223,7 +223,7 @@ const ui = {
 
             // iOS specific: try to lock orientation
             if (isIos && screen.orientation && screen.orientation.lock) {
-                screen.orientation.lock('landscape').catch(() => {});
+                screen.orientation.lock('landscape').catch(() => { });
             }
 
             if (icon) {
@@ -236,9 +236,9 @@ const ui = {
                 if (document.exitFullscreen) document.exitFullscreen();
                 else if (document.webkitExitFullscreen) document.webkitExitFullscreen();
             }
-            
+
             wrapper.classList.remove('pseudo-fullscreen');
-            
+
             if (isIos && screen.orientation && screen.orientation.unlock) {
                 screen.orientation.unlock();
             }
@@ -272,7 +272,7 @@ const ui = {
         const currentUser = auth.getCurrentUser ? auth.getCurrentUser() : null;
         const userName = currentUser ? currentUser.name : '';
 
-        const tileSize = 450; 
+        const tileSize = 450;
         const canvas = document.createElement('canvas');
         canvas.width = tileSize;
         canvas.height = tileSize;
@@ -282,17 +282,17 @@ const ui = {
             ctx.clearRect(0, 0, tileSize, tileSize);
             ctx.save();
             ctx.translate(tileSize / 2, tileSize / 2);
-            ctx.rotate(-Math.PI / 5); 
+            ctx.rotate(-Math.PI / 5);
             ctx.translate(-tileSize / 2, -tileSize / 2);
 
             if (logoImg) {
                 const logoSize = 60;
-                ctx.globalAlpha = 0.20; 
+                ctx.globalAlpha = 0.20;
                 ctx.drawImage(logoImg, (tileSize - logoSize) / 2, tileSize / 2 - 70, logoSize, logoSize);
             }
 
             if (userName) {
-                ctx.globalAlpha = 0.20; 
+                ctx.globalAlpha = 0.20;
                 ctx.fillStyle = '#ffffff';
                 ctx.font = 'bold 18px Inter, Arial, sans-serif';
                 ctx.textAlign = 'center';
@@ -306,10 +306,10 @@ const ui = {
             overlay.style.backgroundImage = `url(${dataUrl})`;
             overlay.style.backgroundRepeat = 'repeat';
             overlay.style.backgroundSize = `${tileSize}px ${tileSize}px`;
-            
+
             // SECURITY: Prevent student from hiding or deleting the watermark via F12
             this.protectWatermark(overlay, dataUrl, tileSize);
-            
+
             // SECURITY: Also protect the sibling iframe attributes
             const iframeId = overlay.id.replace('watermark-overlay-', 'video-iframe-');
             const iframe = document.getElementById(iframeId);
@@ -408,7 +408,7 @@ const ui = {
             if (iframe.hasAttribute('allowfullscreen')) iframe.removeAttribute('allowfullscreen');
             if (iframe.hasAttribute('webkitallowfullscreen')) iframe.removeAttribute('webkitallowfullscreen');
             if (iframe.hasAttribute('mozallowfullscreen')) iframe.removeAttribute('mozallowfullscreen');
-            
+
             // Strictly enforce safe 'allow' list (removes picture-in-picture)
             const targetAllow = 'accelerometer; autoplay; encrypted-media; gyroscope; web-share';
             if (iframe.getAttribute('allow') !== targetAllow) {
@@ -494,7 +494,7 @@ const ui = {
             e.preventDefault();
             const newPw = document.getElementById('cpw-new').value;
             const confirmPw = document.getElementById('cpw-confirm').value;
-            
+
             if (newPw !== confirmPw) {
                 this.showToast('Passwords do not match!', 'error');
                 return;
@@ -507,7 +507,7 @@ const ui = {
 
             try {
                 await auth.changePassword(newPw);
-                
+
                 // Sync new password to Firestore for Admin visibility
                 const user = auth.getCurrentUser();
                 if (user) {
@@ -564,7 +564,7 @@ const ui = {
             e.preventDefault();
             const newPw = document.getElementById('fcpw-new').value;
             const confirmPw = document.getElementById('fcpw-confirm').value;
-            
+
             if (newPw !== confirmPw) {
                 this.showToast('Passwords do not match!', 'error');
                 return;
@@ -577,7 +577,7 @@ const ui = {
 
             try {
                 await auth.changePassword(newPw);
-                
+
                 // Sync new password to Firestore for Admin visibility
                 const user = auth.getCurrentUser();
                 if (user) {
@@ -586,7 +586,7 @@ const ui = {
 
                 this.closeModal('force-change-pw-modal');
                 this.showToast('Password updated successfully');
-                
+
                 // Re-render app view
                 App.setupAppView();
             } catch (err) {
@@ -616,16 +616,16 @@ const ui = {
         const diffInSeconds = Math.floor((now - date) / 1000);
 
         if (diffInSeconds < 60) return 'Just now';
-        
+
         const diffInMinutes = Math.floor(diffInSeconds / 60);
         if (diffInMinutes < 60) return `${diffInMinutes}m ago`;
-        
+
         const diffInHours = Math.floor(diffInMinutes / 60);
         if (diffInHours < 24) return `${diffInHours}h ago`;
-        
+
         const diffInDays = Math.floor(diffInHours / 24);
         if (diffInDays < 7) return `${diffInDays}d ago`;
-        
+
         return date.toLocaleDateString();
     }
 };
