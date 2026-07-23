@@ -158,11 +158,11 @@ const ui = {
             // Fetch with no-cors to test network reachability. It will fail on ERR_TIMED_OUT or Blocked by extension.
             fetch(urlObj.origin + '/?ping=' + Date.now(), { mode: 'no-cors', cache: 'no-store', signal: controller.signal })
                 .then(() => clearTimeout(timeoutId))
-                .catch(() => this.showVideoFallback(videoId));
+                .catch(() => this.showVideoFallback(videoId, url));
         } catch (e) { }
     },
 
-    showVideoFallback(videoId) {
+    showVideoFallback(videoId, url) {
         const wrapper = document.getElementById(`video-wrapper-${videoId}`);
         if (!wrapper) return;
 
@@ -180,6 +180,11 @@ const ui = {
                 <h3 class="text-white font-bold text-lg mb-2">Video Blocked by Browser or Network</h3>
                 <p class="text-gray-400 text-sm mb-5">Your browser's privacy settings, AdBlocker, or your Wi-Fi network has blocked the video player.</p>
                 
+                <a href="${url}" target="_blank" class="mb-5 inline-flex items-center gap-2 px-6 py-2.5 bg-indigo-600 hover:bg-indigo-500 text-white font-bold rounded-lg shadow-lg hover:scale-105 transition-all">
+                    <i class="fas fa-external-link-alt"></i>
+                    Play in New Tab (Bypass Block)
+                </a>
+
                 <div class="bg-gray-800/80 border border-gray-700 rounded-xl p-4 text-left text-xs text-gray-300 space-y-3">
                     <div class="flex items-start gap-3">
                         <i class="fas fa-shield-alt text-emerald-500 mt-0.5"></i>
