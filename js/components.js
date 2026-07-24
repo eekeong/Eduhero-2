@@ -81,14 +81,14 @@ const ui = {
         // Use BunnyStream provider
         if (video.bunnyLibraryId && video.bunnyVideoId) {
             // Disable native fullscreen button to protect watermark (students must use our custom FS button)
-            return `https://iframe.mediadelivery.net/embed/${video.bunnyLibraryId}/${video.bunnyVideoId}?autoplay=false&preload=false&fullScreenButton=false`;
+            return `https://player.mediadelivery.net/embed/${video.bunnyLibraryId}/${video.bunnyVideoId}?autoplay=false&preload=false&fullScreenButton=false`;
         }
 
         // Fallback: Generic URL (if manually pasted as embed link)
         let url = (video.url || '').trim();
         if (!url) return '';
 
-        if (url.includes('iframe.mediadelivery.net/embed/')) {
+        if (url.includes('player.mediadelivery.net/embed/') || url.includes('iframe.mediadelivery.net/embed/')) {
             let baseUrl = url;
             if (!baseUrl.includes('autoplay=')) baseUrl += (baseUrl.includes('?') ? '&' : '?') + 'autoplay=false&preload=false';
             if (!baseUrl.includes('fullScreenButton=')) baseUrl += (baseUrl.includes('?') ? '&' : '?') + 'fullScreenButton=false';
@@ -102,7 +102,7 @@ const ui = {
         if (!video) return '';
 
         if (video.bunnyLibraryId && video.bunnyVideoId) {
-            return `https://iframe.mediadelivery.net/embed/${video.bunnyLibraryId}/${video.bunnyVideoId}/thumbnail.jpg`;
+            return `https://player.mediadelivery.net/embed/${video.bunnyLibraryId}/${video.bunnyVideoId}/thumbnail.jpg`;
         }
 
         return 'https://via.placeholder.com/320x180.png?text=Video';
