@@ -248,6 +248,10 @@ const TeacherPage = {
                     <div class="bg-gray-50 p-4 rounded-xl border border-gray-200 relative overflow-hidden">
                         <label class="block text-xs font-bold text-gray-500 uppercase mb-2">Video File</label>
                         <input type="file" id="av-video-file" accept="video/*" required class="w-full text-sm text-gray-500 file:mr-4 file:py-2 file:px-4 file:rounded-full file:border-0 file:text-sm file:font-semibold file:bg-indigo-50 file:text-indigo-700 hover:file:bg-indigo-100 cursor-pointer">
+                        <p class="text-xs text-red-500 mt-2 font-medium">
+                            <i class="fas fa-exclamation-triangle mr-1"></i>
+                            If upload fails/stucks, please switch to a different Wi-Fi or Mobile Hotspot AND use Incognito/Private mode to re-upload. If issue persists, contact Technical team.
+                        </p>
                         
                         <div id="upload-progress-overlay" class="hidden absolute inset-0 bg-white/95 backdrop-blur-sm flex-col items-center justify-center p-6 z-10">
                             <div class="w-full flex justify-between text-xs font-bold text-indigo-600 uppercase mb-3 tracking-wider">

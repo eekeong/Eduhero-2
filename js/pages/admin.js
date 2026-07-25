@@ -1618,6 +1618,10 @@ const AdminPage = {
                             <p class="text-sm text-gray-600 font-medium" id="aav-file-name">Click to browse or drag and drop</p>
                             <p class="text-xs text-gray-400 mt-1">MP4, WebM up to 5GB</p>
                         </div>
+                        <p class="text-xs text-red-500 mt-2 font-medium">
+                            <i class="fas fa-exclamation-triangle mr-1"></i>
+                            If upload fails/stucks, please switch to a different Wi-Fi or Mobile Hotspot AND use Incognito/Private mode to re-upload. If issue persists, contact Technical team.
+                        </p>
                     </div>
 
                     <div id="aav-progress-container" class="hidden mt-4">
