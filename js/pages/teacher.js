@@ -288,6 +288,13 @@ const TeacherPage = {
             // Check if mapped for THIS specific teacher
             const mappings = store.getBunnySecrets().mappings || [];
             const mapping = mappings.find(m => m.subjectId === subjectId && m.teacherId === user.id);
+            console.log("=== UPLOAD DEBUG ===");
+            console.log("Current Teacher ID:", user.id);
+            console.log("Target Subject ID:", subjectId);
+            console.log("All Mappings from Store:", JSON.parse(JSON.stringify(mappings)));
+            console.log("Found Mapping:", mapping);
+            console.log("====================");
+            
             if (!mapping || !mapping.libraryKey) {
                 alert('Your teacher account is not configured for direct upload for this subject. Please contact Admin.');
                 return;
