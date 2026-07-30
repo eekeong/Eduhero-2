@@ -102,7 +102,11 @@ async function seedIfEmpty() {
         }
         console.log('[Store] ✅ Seeding check complete.');
     } catch (err) {
-        console.error('[Store] ❌ Seeding failed:', err);
+        if (err.code === 'permission-denied') {
+            console.log('[Store] ℹ️ Skipping seed check (expected for non-admins).');
+        } else {
+            console.error('[Store] ❌ Seeding failed:', err);
+        }
     }
 }
 
