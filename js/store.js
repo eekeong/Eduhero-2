@@ -34,7 +34,9 @@ const _cache = {
     ready:       false,
     listeners:   [],  // array of unsubscribe functions
     initialUsersLoaded: false,
-    progressLoaded: false
+    progressLoaded: false,
+    adminDataLoaded: false,
+    counts: null
 };
 
 // ── Helpers ──────────────────────────────────────────────────
@@ -211,32 +213,36 @@ function subscribeScopedVideos(user) {
 // stays correct after the admin's own actions. The Refresh button re-reads when
 // they want to pick up other people's changes.
 async function loadAdminUsers() {
-    try {
-        const snap = await db.collection(COLLECTIONS.USERS).get();
-        _cache.users = snap.docs.map(docToObj);
-        _cache.initialUsersLoaded = true;
-        if (typeof AdminPage !== 'undefined' && document.getElementById('admin-users-list')) {
-            AdminPage.renderUsers();
-            AdminPage.renderSubjects(); // teacher counts in the subjects list
-            AdminPage.renderStats();
-        }
-    } catch (err) {
-        console.error('[Store] Could not load users:', err);
-    }
+    const snap = await db.collection(COLLECTIONS.USERS).get();
+    _cache.users = snap.docs.map(docToObj);
+    _cache.initialUsersLoaded = true;
 }
 
 async function loadAdminVideos() {
-    try {
-        const snap = await db.collection(COLLECTIONS.VIDEOS).get();
-        _cache.videos = snap.docs.map(docToObj);
-        if (typeof AdminPage !== 'undefined' && document.getElementById('admin-videos-list')) {
-            AdminPage.renderVideos();
-            AdminPage.renderSubjects(); // video counts in the subjects list
-            AdminPage.renderStats();
-        }
-    } catch (err) {
-        console.error('[Store] Could not load videos:', err);
+    const snap = await db.collection(COLLECTIONS.VIDEOS).get();
+    _cache.videos = snap.docs.map(docToObj);
+}
+
+// Counts for the dashboard cards, without downloading the collections.
+//
+// The compat SDK has no aggregation API at any version — count() lives only in
+// the modular build — so the modular Firestore is pulled in dynamically and
+// pointed at the compat instance's underlying delegate. It is imported ONLY
+// here, which means only an admin ever downloads it; students and teachers
+// never touch this path and their page weight is unchanged.
+//
+// An aggregation is billed one read per 1000 documents matched, so counting
+// 5031 users costs 6 reads instead of 5031.
+let _modularFirestore = null;
+async function modularCount(collectionName, field, op, value) {
+    if (!_modularFirestore) {
+        _modularFirestore = await import('https://www.gstatic.com/firebasejs/10.14.1/firebase-firestore.js');
     }
+    const m = _modularFirestore;
+    const base = m.collection(db._delegate, collectionName);
+    const q = field ? m.query(base, m.where(field, op, value)) : base;
+    const snap = await m.getCountFromServer(q);
+    return snap.data().count;
 }
 
 function waitForSnapshot(query, callback, unsubsArray) {
@@ -381,13 +387,13 @@ async function attachRoleListeners(user) {
 
     // ── ADMIN-only data: one-time reads, see loadAdminUsers() above ──
     if (user.role === 'admin') {
-        promises.push(loadAdminUsers());
-        promises.push(loadAdminVideos());
-        // NOTE: activityLog has NO listener — fetched on-demand only.
-        // NOTE: progress has neither a listener nor an eager read. It is the
-        // largest collection in the system, and the only things that read it are
-        // the Learning Reports tab and the per-student reset, both of which now
-        // fetch it themselves.
+        // Nothing eager. The dashboard lands on a view that needs no collection,
+        // so an admin who opens the app and leaves pays for the shared listeners
+        // and four count queries — not 8000+ documents.
+        //
+        // store.ensureAdminData() pulls users + videos the first time a screen
+        // actually needs them; the reports tab and the activity log fetch their
+        // own data on demand.
 
     // ── TEACHER-only listeners ────────────────────────────────
     } else if (user.role === 'teacher') {
@@ -1139,11 +1145,40 @@ const store = {
         return snap.docs.map(docToObj);
     },
 
+    // Users and videos, fetched once and then reused. Every admin screen that
+    // needs either of them awaits this first.
+    async ensureAdminData() {
+        if (_cache.adminDataLoaded) return;
+        await Promise.all([loadAdminUsers(), loadAdminVideos()]);
+        _cache.adminDataLoaded = true;
+    },
+
+    isAdminDataLoaded() {
+        return !!_cache.adminDataLoaded;
+    },
+
+    // Dashboard cards. Cheap enough to run on every admin page load.
+    async fetchCounts() {
+        const [students, teachers, videos] = await Promise.all([
+            modularCount(COLLECTIONS.USERS, 'role', '==', 'student'),
+            modularCount(COLLECTIONS.USERS, 'role', '==', 'teacher'),
+            modularCount(COLLECTIONS.VIDEOS)
+        ]);
+        _cache.counts = { students, teachers, videos, subjects: _cache.subjects.length };
+        return _cache.counts;
+    },
+
+    getCounts() {
+        return _cache.counts;
+    },
+
     // Re-read what the admin screen shows. These are no longer live listeners,
     // so the Refresh button is how an admin picks up other people's changes.
     async refreshAdminData() {
         _cache.progressLoaded = false;
-        await Promise.all([loadAdminUsers(), loadAdminVideos()]);
+        _cache.adminDataLoaded = false;
+        _cache.counts = null;
+        await Promise.all([this.ensureAdminData(), this.fetchCounts()]);
     },
 
     getProgressRecords() {
