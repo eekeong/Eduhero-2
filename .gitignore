@@ -3,3 +3,11 @@ node_modules/
 firebase-debug.log
 firestore-debug.log
 *-debug.log
+
+# Firebase service account keys — full project access, never commit
+*serviceaccount*.json
+*firebase-adminsdk*.json
+*adminsdk*.json
+*service-account*.json
+*-sa.json
+migration-report/
