@@ -466,7 +466,17 @@ const StudentPage = {
                 
                 if (message.context !== 'player.js') return;
 
-                // Something is coming back, so the subscription took: stop retrying.
+                // The player announces itself unprompted, before any handshake,
+                // and advertises addEventListener plus the events it can send.
+                // That announcement is the most reliable moment to subscribe —
+                // far better than guessing with a timer. It does NOT count as
+                // proof the subscription took, so the retry loop keeps running.
+                if (message.event === 'ready') {
+                    subscribe();
+                    return;
+                }
+
+                // A subscribed event came back, so the handshake took: stop retrying.
                 this._bunnyEventsSeen = true;
 
                 if (message.event === 'play' && !hasStarted) {
