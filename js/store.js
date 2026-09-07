@@ -157,7 +157,14 @@ async function attachRoleListeners(user) {
     promises.push(waitForSnapshot(
         db.collection(COLLECTIONS.SETTINGS).doc('main'),
         doc => {
-            if (doc.exists) _cache.settings = { ...DEFAULT_SETTINGS, ...doc.data() };
+            if (doc.exists) {
+                _cache.settings = { ...DEFAULT_SETTINGS, ...doc.data() };
+                // Re-apply branding so a settings change (or settings that arrived
+                // after the 3s boot timeout) shows up without a page reload.
+                if (typeof App !== 'undefined' && typeof App.applySystemSettings === 'function') {
+                    App.applySystemSettings();
+                }
+            }
         },
         unsubs
     ));
@@ -414,10 +421,16 @@ const store = {
         return { ...DEFAULT_SETTINGS, ..._cache.settings };
     },
 
-    updateSettings(updates) {
-        const merged = { ...this.getSettings(), ...updates };
+    async updateSettings(updates) {
+        const previous = { ...this.getSettings() };
+        const merged = { ...previous, ...updates };
         _cache.settings = merged; // optimistic local update
-        return db.collection(COLLECTIONS.SETTINGS).doc('main').set(merged);
+        try {
+            await db.collection(COLLECTIONS.SETTINGS).doc('main').set(merged);
+        } catch (err) {
+            _cache.settings = previous; // roll back so the UI stops showing a value that was never saved
+            throw err;
+        }
     },
 
     // ----------------------------------------------------------

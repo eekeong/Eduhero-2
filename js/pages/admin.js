@@ -367,17 +367,32 @@ const AdminPage = {
         }
     },
 
+    // init() — call ONCE, right after AdminPage.render() has replaced the DOM.
+    // It resets view state and binds every persistent listener.
+    // To redraw after a data change, call refresh() — NOT init(). Re-running init()
+    // on an already-rendered page used to stack a duplicate handler on every tab
+    // button and on the settings form, so one click fired the handler N times.
     init() {
         this.currentRoleFilter = 'all';
         this.userPage = 1;
         this.usersPerPage = 50;
-        
+
         this.videoPage = 1;
         this.videosPerPage = 50;
-        
+
         this.logPage = 1;
         this.logsPerPage = 30;
 
+        this.refresh();
+        this.syncSettingsForm();
+        this.setupTabs();
+        this.bindSettingsForm();
+    },
+
+    // refresh() — redraw the lists from the current store cache.
+    // Binds nothing and resets no pagination/filter state, so it is safe to call
+    // from anywhere (mutations, snapshot listeners) as often as needed.
+    refresh() {
         this.renderStats();
         this.renderUsers();
         this.renderSubjects();
@@ -385,14 +400,88 @@ const AdminPage = {
         // NOTE: renderActivityLog() is NOT called here.
         // Activity log is fetched from Firestore on-demand
         // when the admin clicks the Activity Log tab.
-        this.setupTabs();
-        
+    },
+
+    // Load the settings tab's inputs from the store. Deliberately NOT part of
+    // refresh(): a background snapshot must never overwrite what the admin is typing.
+    syncSettingsForm() {
         const settings = store.getSettings();
-        document.getElementById('setting-system-name').value = settings.systemName || 'EduHero';
+        const nameEl = document.getElementById('setting-system-name');
+        if (!nameEl) return;
+
+        nameEl.value = settings.systemName || 'EduHero';
         document.getElementById('setting-system-color').value = settings.systemColor || '#4F46E5';
         document.getElementById('setting-system-color-picker').value = settings.systemColor || '#4F46E5';
         document.getElementById('setting-system-color2').value = settings.systemColor2 || '#7C3AED';
         document.getElementById('setting-system-color2-picker').value = settings.systemColor2 || '#7C3AED';
+
+        this._pendingLogoUrl = settings.logoUrl || '';
+        this._pendingStudentAvatar = settings.studentAvatarUrl || '';
+        this.updateLogoPreview(this._pendingLogoUrl);
+        this.updateStudentAvatarPreview(this._pendingStudentAvatar);
+    },
+
+    updateLogoPreview(url) {
+        const logoImg = document.getElementById('settings-logo-img');
+        const logoIcon = document.getElementById('settings-logo-icon');
+        const removeBtn = document.getElementById('setting-logo-remove');
+        if (!logoImg) return;
+
+        if (url) {
+            logoImg.src = url;
+            logoImg.classList.remove('hidden');
+            logoIcon.style.display = 'none';
+            removeBtn.classList.remove('hidden');
+        } else {
+            logoImg.src = 'data:image/gif;base64,R0lGODlhAQABAAD/ACwAAAAAAQABAAACADs=';
+            logoImg.classList.add('hidden');
+            logoIcon.style.display = '';
+            removeBtn.classList.add('hidden');
+        }
+    },
+
+    updateStudentAvatarPreview(url) {
+        const stuAvatarImg = document.getElementById('settings-student-avatar-img');
+        const stuAvatarIcon = document.getElementById('settings-student-avatar-icon');
+        const stuRemoveBtn = document.getElementById('setting-student-avatar-remove');
+        if (!stuAvatarImg) return;
+
+        if (url) {
+            stuAvatarImg.src = url;
+            stuAvatarImg.classList.remove('hidden');
+            stuAvatarIcon.style.display = 'none';
+            stuRemoveBtn.classList.remove('hidden');
+        } else {
+            stuAvatarImg.src = 'data:image/gif;base64,R0lGODlhAQABAAD/ACwAAAAAAQABAAACADs=';
+            stuAvatarImg.classList.add('hidden');
+            stuAvatarIcon.style.display = '';
+            stuRemoveBtn.classList.add('hidden');
+        }
+    },
+
+    // Read an image file into a base64 data URL for the settings doc.
+    // Firestore caps a document at 1MB and base64 inflates a file by ~33%, so the
+    // real ceiling is well under 1MB — a larger file used to fail the write silently.
+    _readImageForSettings(input, label, onLoaded) {
+        const file = input.files[0];
+        if (!file) return;
+        if (file.size > 700 * 1024) {
+            ui.showToast(`${label} must be less than 700KB (Firestore document limit)`, 'error');
+            input.value = '';
+            return;
+        }
+        const reader = new FileReader();
+        reader.onload = (event) => onLoaded(event.target.result);
+        reader.readAsDataURL(file);
+    },
+
+    // Bind the settings tab. Guarded by a data attribute on the form itself, so a
+    // stray second call can never stack duplicate handlers; a fresh render() yields
+    // a fresh node without the attribute and rebinds correctly.
+    bindSettingsForm() {
+        const form = document.getElementById('admin-settings-form');
+        if (!form || form.dataset.bound) return;
+        form.dataset.bound = '1';
 
         const syncColor = (pickerId, inputId) => {
             const picker = document.getElementById(pickerId);
@@ -406,107 +495,64 @@ const AdminPage = {
         };
         syncColor('setting-system-color-picker', 'setting-system-color');
         syncColor('setting-system-color2-picker', 'setting-system-color2');
-        
-        let currentLogoUrl = settings.logoUrl || '';
-        const logoImg = document.getElementById('settings-logo-img');
-        const logoIcon = document.getElementById('settings-logo-icon');
-        const removeBtn = document.getElementById('setting-logo-remove');
-
-        const updateLogoPreview = (url) => {
-            if (url) {
-                logoImg.src = url;
-                logoImg.classList.remove('hidden');
-                logoIcon.style.display = 'none';
-                removeBtn.classList.remove('hidden');
-            } else {
-                logoImg.src = 'data:image/gif;base64,R0lGODlhAQABAAD/ACwAAAAAAQABAAACADs=';
-                logoImg.classList.add('hidden');
-                logoIcon.style.display = '';
-                removeBtn.classList.add('hidden');
-            }
-        };
-        
-        updateLogoPreview(currentLogoUrl);
 
         document.getElementById('setting-logo-file').addEventListener('change', (e) => {
-            const file = e.target.files[0];
-            if (file) {
-                if (file.size > 2 * 1024 * 1024) { // 2MB limit
-                    ui.showToast('File size must be less than 2MB', 'error');
-                    e.target.value = '';
-                    return;
-                }
-                const reader = new FileReader();
-                reader.onload = (event) => {
-                    currentLogoUrl = event.target.result;
-                    updateLogoPreview(currentLogoUrl);
-                };
-                reader.readAsDataURL(file);
-            }
+            this._readImageForSettings(e.target, 'Logo', (dataUrl) => {
+                this._pendingLogoUrl = dataUrl;
+                this.updateLogoPreview(dataUrl);
+            });
         });
 
         document.getElementById('setting-logo-remove').addEventListener('click', () => {
-            currentLogoUrl = '';
+            this._pendingLogoUrl = '';
             document.getElementById('setting-logo-file').value = '';
-            updateLogoPreview('');
+            this.updateLogoPreview('');
         });
 
-        let currentStudentAvatar = settings.studentAvatarUrl || '';
-        const stuAvatarImg = document.getElementById('settings-student-avatar-img');
-        const stuAvatarIcon = document.getElementById('settings-student-avatar-icon');
-        const stuRemoveBtn = document.getElementById('setting-student-avatar-remove');
-
-        const updateStudentAvatarPreview = (url) => {
-            if (url) {
-                stuAvatarImg.src = url;
-                stuAvatarImg.classList.remove('hidden');
-                stuAvatarIcon.style.display = 'none';
-                stuRemoveBtn.classList.remove('hidden');
-            } else {
-                stuAvatarImg.src = 'data:image/gif;base64,R0lGODlhAQABAAD/ACwAAAAAAQABAAACADs=';
-                stuAvatarImg.classList.add('hidden');
-                stuAvatarIcon.style.display = '';
-                stuRemoveBtn.classList.add('hidden');
-            }
-        };
-        
-        updateStudentAvatarPreview(currentStudentAvatar);
-
         document.getElementById('setting-student-avatar-file').addEventListener('change', (e) => {
-            const file = e.target.files[0];
-            if (file) {
-                if (file.size > 2 * 1024 * 1024) { // 2MB limit
-                    ui.showToast('File size must be less than 2MB', 'error');
-                    e.target.value = '';
-                    return;
-                }
-                const reader = new FileReader();
-                reader.onload = (event) => {
-                    currentStudentAvatar = event.target.result;
-                    updateStudentAvatarPreview(currentStudentAvatar);
-                };
-                reader.readAsDataURL(file);
-            }
+            this._readImageForSettings(e.target, 'Avatar', (dataUrl) => {
+                this._pendingStudentAvatar = dataUrl;
+                this.updateStudentAvatarPreview(dataUrl);
+            });
         });
 
         document.getElementById('setting-student-avatar-remove').addEventListener('click', () => {
-            currentStudentAvatar = '';
+            this._pendingStudentAvatar = '';
             document.getElementById('setting-student-avatar-file').value = '';
-            updateStudentAvatarPreview('');
+            this.updateStudentAvatarPreview('');
         });
 
-        document.getElementById('admin-settings-form').addEventListener('submit', (e) => {
+        form.addEventListener('submit', async (e) => {
             e.preventDefault();
-            store.updateSettings({
-                systemName: document.getElementById('setting-system-name').value || 'EduHero',
-                systemColor: document.getElementById('setting-system-color').value || '#4F46E5',
-                systemColor2: document.getElementById('setting-system-color2').value || '#7C3AED',
-                logoUrl: currentLogoUrl,
-                studentAvatarUrl: currentStudentAvatar
-            });
-            ui.showToast('Settings saved successfully');
-            App.applySystemSettings();
-            AdminPage.init();
+            const submitBtn = form.querySelector('button[type="submit"]');
+            const originalText = submitBtn ? submitBtn.innerHTML : '';
+            if (submitBtn) {
+                submitBtn.disabled = true;
+                submitBtn.innerHTML = '<i class="fas fa-spinner fa-spin mr-2"></i>Saving...';
+            }
+
+            try {
+                // Await the write: a failure here (permission, oversized document)
+                // used to be swallowed while the UI still claimed success.
+                await store.updateSettings({
+                    systemName: document.getElementById('setting-system-name').value || 'EduHero',
+                    systemColor: document.getElementById('setting-system-color').value || '#4F46E5',
+                    systemColor2: document.getElementById('setting-system-color2').value || '#7C3AED',
+                    logoUrl: this._pendingLogoUrl || '',
+                    studentAvatarUrl: this._pendingStudentAvatar || ''
+                });
+                ui.showToast('Settings saved successfully');
+                App.applySystemSettings();
+                this.refresh();
+            } catch (err) {
+                console.error('[Admin] Settings save failed:', err);
+                ui.showToast('Failed to save settings: ' + (err.message || err), 'error');
+            } finally {
+                if (submitBtn) {
+                    submitBtn.disabled = false;
+                    submitBtn.innerHTML = originalText;
+                }
+            }
         });
     },
 
@@ -526,9 +572,15 @@ const AdminPage = {
     },
 
     setupTabs() {
+        const tabBar = document.getElementById('admin-tabs');
+        // Guard on the container: re-binding these would make one tab click run the
+        // handler N times — including N on-demand fetches of 500 activity-log docs.
+        if (!tabBar || tabBar.dataset.bound) return;
+        tabBar.dataset.bound = '1';
+
         const tabs = document.querySelectorAll('#admin-tabs button');
         const contents = document.querySelectorAll('.tab-content');
-        
+
         tabs.forEach(tab => {
             tab.addEventListener('click', () => {
                 // Reset styles
@@ -1292,7 +1344,7 @@ const AdminPage = {
                 });
                 ui.closeModal('edit-level-modal');
                 ui.showToast(`Level name updated for ${updated} subjects`);
-                AdminPage.init();
+                AdminPage.refresh();
             } else {
                 ui.closeModal('edit-level-modal');
             }
@@ -1305,7 +1357,7 @@ const AdminPage = {
             subjects.forEach(s => store.deleteSubject(s.id));
             ui.closeModal('edit-level-modal');
             ui.showToast(`Deleted level and its ${subjects.length} subjects`);
-            AdminPage.init();
+            AdminPage.refresh();
         }
     },
 
@@ -1738,7 +1790,10 @@ const AdminPage = {
         
         const iframe = modal.querySelector('iframe');
         if (iframe) iframe.src = 'about:blank';
-        
+
+        // Stop the watermark/iframe guard timers and observers for this player.
+        ui.releaseVideoGuards();
+
         modal.remove();
         if (screen.orientation && screen.orientation.unlock) {
             screen.orientation.unlock();
@@ -2158,7 +2213,7 @@ const AdminPage = {
                     }
                 }
                 ui.showToast(`Successfully imported: ${added} added, ${updated} updated.`);
-                AdminPage.init();
+                AdminPage.refresh();
             }
         });
         event.target.value = ''; // reset
@@ -2230,7 +2285,7 @@ const AdminPage = {
                 if (typeof store.addLog === 'function') {
                     store.addLog('Maintenance', `Bulk video import performed: ${added} added.`);
                 }
-                AdminPage.init();
+                AdminPage.refresh();
             }
         });
         event.target.value = ''; // reset
@@ -2366,7 +2421,7 @@ const AdminPage = {
                 store.addLog('Create User', `${role}: ${name} (${email})`);
                 ui.closeModal('add-user-modal');
                 ui.showToast('User added. Status: First Login');
-                AdminPage.init();
+                AdminPage.refresh();
             } catch (err) {
                 ui.showToast('Error: ' + err.message, 'error');
             } finally {
@@ -3084,7 +3139,7 @@ ${user.name} 本月表现非常积极，已经跟上所有进度，请继续保�
             store.addLog('Delete User', `${user ? user.role : 'user'}: ${user ? user.name : userId}`);
             await store.deleteUser(userId);
             ui.showToast('User deleted from database');
-            AdminPage.init();
+            AdminPage.refresh();
         }
     },
 
@@ -3133,7 +3188,7 @@ ${user.name} 本月表现非常积极，已经跟上所有进度，请继续保�
             });
             ui.closeModal('add-subject-modal');
             ui.showToast('Subject created successfully');
-            AdminPage.init();
+            AdminPage.refresh();
         });
     },
 
@@ -3185,7 +3240,7 @@ ${user.name} 本月表现非常积极，已经跟上所有进度，请继续保�
             });
             ui.closeModal('edit-subject-modal');
             ui.showToast('Subject updated successfully');
-            AdminPage.init();
+            AdminPage.refresh();
         });
     },
 
@@ -3193,7 +3248,7 @@ ${user.name} 本月表现非常积极，已经跟上所有进度，请继续保�
         if (confirm('Delete this subject? This will remove all associated videos and unassign it from all users.')) {
             store.deleteSubject(subjectId);
             ui.showToast('Subject deleted');
-            AdminPage.init();
+            AdminPage.refresh();
         }
     },
 

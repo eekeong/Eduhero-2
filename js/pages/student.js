@@ -366,8 +366,12 @@ const StudentPage = {
         // Tracking: Opened
         store.trackVideoProgress(user.id, videoId, 'opened');
         
-        const existingModal = document.getElementById('video-fullscreen-modal');
-        if (existingModal) existingModal.remove();
+        // Close the previous player properly instead of just ripping the modal out:
+        // a bare remove() left the old 'message' listener attached (so the new video's
+        // playback was tracked against the old video) and lost the old watch session.
+        if (document.getElementById('video-fullscreen-modal')) {
+            this.closeVideo(this._currentVideoId);
+        }
 
         const modalHtml = `
             <button onclick="StudentPage.closeVideo('${videoId}')" class="absolute top-4 right-4 md:top-6 md:right-8 z-[100] text-white bg-gray-900 bg-opacity-80 hover:bg-red-600 rounded-full w-12 h-12 flex items-center justify-center shadow-lg transition-colors border border-white/20">
@@ -391,29 +395,42 @@ const StudentPage = {
     closeVideo(videoId) {
         const modal = document.getElementById('video-fullscreen-modal');
         if (!modal) return;
-        
+
+        videoId = videoId || this._currentVideoId;
+
         // Cleanup any pseudo-fullscreen elements
         document.querySelectorAll('.pseudo-fullscreen').forEach(el => el.classList.remove('pseudo-fullscreen'));
-        
+
         const iframe = modal.querySelector('iframe');
         if (iframe) iframe.src = 'about:blank';
 
         // Final session duration track
-        if (this._currentSessionStart) {
+        if (this._currentSessionStart && videoId) {
             const sessionDuration = Math.floor((Date.now() - this._currentSessionStart) / 1000);
             const user = auth.getCurrentUser();
-            store.trackVideoProgress(user.id, videoId, 'closed', { 
-                duration: sessionDuration,
-                percentage: this._currentPercentage || 0 
-            });
-            this._currentSessionStart = null;
+            if (user) {
+                store.trackVideoProgress(user.id, videoId, 'closed', {
+                    duration: sessionDuration,
+                    percentage: this._currentPercentage || 0
+                });
+            }
         }
-        
+        this._currentSessionStart = null;
+
         // Remove Bunny Listener if any
         if (this._bunnyListener) {
             window.removeEventListener('message', this._bunnyListener);
             this._bunnyListener = null;
         }
+
+        // Stop the watermark/iframe guard timers and observers for this player.
+        // Without this every opened video leaves timers running for the whole session.
+        ui.releaseVideoGuards();
+
+        // Reset per-video tracking state so it can't bleed into the next video.
+        this._currentVideoId = null;
+        this._currentPercentage = 0;
+        this._milestonesReached = new Set();
 
         modal.remove();
         if (document.fullscreenElement) document.exitFullscreen().catch(() => {});
@@ -427,6 +444,8 @@ const StudentPage = {
             (store.getProgressRecord(studentId, videoId)?.milestones || [])
         );
         this._currentSessionStart = Date.now();
+        this._currentVideoId = videoId;
+        this._currentPercentage = 0;
 
         this.initBunnyPlayer(videoId, studentId);
     },

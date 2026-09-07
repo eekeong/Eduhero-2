@@ -126,7 +126,7 @@ const ui = {
         // Build watermark after next tick so the DOM is ready
         setTimeout(() => {
             ui.applyVideoWatermark(videoId);
-            ui.checkVideoConnectivity(embedUrl, videoId);
+            ui.watchVideoLoad(videoId, embedUrl);
         }, 200);
 
         return `
@@ -149,17 +149,38 @@ const ui = {
         `;
     },
 
-    checkVideoConnectivity(url, videoId) {
-        try {
-            const urlObj = new URL(url);
-            const controller = new AbortController();
-            const timeoutId = setTimeout(() => controller.abort(), 8000); // 8 seconds timeout
+    // Decide whether the player is actually blocked by watching the iframe itself.
+    //
+    // This used to fire a no-cors `fetch` ping at the player's origin and show the
+    // "Video Blocked" screen whenever that ping failed. The ping fails for plenty of
+    // reasons that have nothing to do with the video — a tracker blocker that only
+    // blocks fetch, a slow connection, a captive network — so students were shown a
+    // blocked-video screen on top of a video that was playing fine. The iframe's own
+    // load result is the thing we actually care about.
+    watchVideoLoad(videoId, url) {
+        const iframe = document.getElementById(`video-iframe-${videoId}`);
+        if (!iframe) return;
 
-            // Fetch with no-cors to test network reachability. It will fail on ERR_TIMED_OUT or Blocked by extension.
-            fetch(urlObj.origin + '/?ping=' + Date.now(), { mode: 'no-cors', cache: 'no-store', signal: controller.signal })
-                .then(() => clearTimeout(timeoutId))
-                .catch(() => this.showVideoFallback(videoId, url));
-        } catch (e) { }
+        let settled = false;
+
+        const timeoutId = setTimeout(() => {
+            if (!settled) this.showVideoFallback(videoId, url);
+        }, 12000);
+
+        iframe.addEventListener('load', () => {
+            settled = true;
+            clearTimeout(timeoutId);
+        }, { once: true });
+
+        iframe.addEventListener('error', () => {
+            if (settled) return;
+            settled = true;
+            clearTimeout(timeoutId);
+            this.showVideoFallback(videoId, url);
+        }, { once: true });
+
+        // Tie the watchdog to the player so closing the video cancels it.
+        this._registerVideoGuard(videoId, { interval: timeoutId });
     },
 
     showVideoFallback(videoId, url) {
@@ -313,12 +334,12 @@ const ui = {
             overlay.style.backgroundSize = `${tileSize}px ${tileSize}px`;
 
             // SECURITY: Prevent student from hiding or deleting the watermark via F12
-            this.protectWatermark(overlay, dataUrl, tileSize);
+            this.protectWatermark(overlay, dataUrl, tileSize, videoId);
 
             // SECURITY: Also protect the sibling iframe attributes
             const iframeId = overlay.id.replace('watermark-overlay-', 'video-iframe-');
             const iframe = document.getElementById(iframeId);
-            if (iframe) this.protectIframe(iframe);
+            if (iframe) this.protectIframe(iframe, videoId);
         };
 
         if (logoUrl) {
@@ -331,7 +352,34 @@ const ui = {
         }
     },
 
-    protectWatermark(element, dataUrl, tileSize) {
+    // Guards (intervals + MutationObservers) created for an open player, keyed by
+    // videoId. They MUST be released when the player closes — otherwise every video
+    // the user opens leaves two 500ms timers and four observers running for the rest
+    // of the session, writing styles onto detached nodes and steadily slowing the app.
+    _videoGuards: {},
+
+    _registerVideoGuard(videoId, guard) {
+        const key = videoId || 'default';
+        if (!this._videoGuards[key]) this._videoGuards[key] = { intervals: [], observers: [] };
+        if (guard.interval) this._videoGuards[key].intervals.push(guard.interval);
+        if (guard.observer) this._videoGuards[key].observers.push(guard.observer);
+    },
+
+    // Release the guards for one video, or for every video when called with no id.
+    releaseVideoGuards(videoId) {
+        const keys = videoId ? [videoId] : Object.keys(this._videoGuards);
+        keys.forEach(key => {
+            const guard = this._videoGuards[key];
+            if (!guard) return;
+            guard.intervals.forEach(id => { clearInterval(id); clearTimeout(id); });
+            guard.observers.forEach(obs => {
+                try { obs.disconnect(); } catch (e) {}
+            });
+            delete this._videoGuards[key];
+        });
+    },
+
+    protectWatermark(element, dataUrl, tileSize, videoId) {
         if (!element || element.dataset.protected) return;
         element.dataset.protected = "true";
 
@@ -383,15 +431,19 @@ const ui = {
         lockStyles();
 
         // 4. Fail-safe: Rapid periodic checks (every 500ms) to ensure absolute presence & correct styling
-        setInterval(() => {
+        const intervalId = setInterval(() => {
             if (!originalParent.contains(element)) {
                 originalParent.appendChild(element);
             }
             lockStyles();
         }, 500);
+
+        this._registerVideoGuard(videoId, { interval: intervalId });
+        this._registerVideoGuard(videoId, { observer: parentObserver });
+        this._registerVideoGuard(videoId, { observer: selfObserver });
     },
 
-    protectIframe(iframe) {
+    protectIframe(iframe, videoId) {
         if (!iframe || iframe.dataset.protected) return;
         iframe.dataset.protected = "true";
 
@@ -455,7 +507,7 @@ const ui = {
         selfObserver.observe(iframe, { attributes: true });
 
         // Fail-safe: Rapid periodic checks (every 500ms)
-        setInterval(() => {
+        const intervalId = setInterval(() => {
             if (!originalParent.contains(iframe)) {
                 const watermarkId = iframe.id.replace('video-iframe-', 'watermark-overlay-');
                 const watermark = document.getElementById(watermarkId);
@@ -467,6 +519,10 @@ const ui = {
             }
             lockAttributes();
         }, 500);
+
+        this._registerVideoGuard(videoId, { interval: intervalId });
+        this._registerVideoGuard(videoId, { observer: parentObserver });
+        this._registerVideoGuard(videoId, { observer: selfObserver });
 
         // Initial lock
         lockAttributes();

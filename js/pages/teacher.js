@@ -543,6 +543,10 @@ const TeacherPage = {
         
         const iframe = modal.querySelector('iframe');
         if (iframe) iframe.src = 'about:blank';
+
+        // Stop the watermark/iframe guard timers and observers for this player.
+        ui.releaseVideoGuards();
+
         modal.remove();
         if (screen.orientation && screen.orientation.unlock) screen.orientation.unlock();
         if (document.fullscreenElement) document.exitFullscreen().catch(() => {});

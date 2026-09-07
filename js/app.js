@@ -1,30 +1,39 @@
 // Main Application Logic
 const App = {
+    // Guards against the two render entry points (the auth-state listener and the
+    // login form) racing each other into a double render.
+    _rendering: false,
+    _renderPending: false,
+    _renderedUserId: null,
+    _loaderHideTimer: null,
+
     async init() {
         console.log('[App] 🚀 Initializing...');
-        // Start store init (branding data) but with a timeout to avoid hanging the UI
-        try {
-            await Promise.race([
-                store.init(),
-                new Promise(resolve => setTimeout(resolve, 3000)) // Max 3s for critical branding
-            ]);
 
-            // TEMPORARY SCRIPT TO DELETE SYSTEM ADMINS MOVED DOWN
-        } catch (err) {
-            console.error('[App] Store init timed out or failed:', err);
-        }
-        
+        // Don't block the UI on the network — render with whatever settings we have
+        // after 3s. If the real settings land later, re-apply the branding then
+        // instead of leaving the page on the defaults.
+        const settingsReady = store.init();
+        settingsReady
+            .then(() => this.applySystemSettings())
+            .catch(err => console.error('[App] Store init failed:', err));
+
+        await Promise.race([
+            settingsReady.catch(() => {}),
+            new Promise(resolve => setTimeout(resolve, 3000)) // Max 3s for critical branding
+        ]);
+
         this.applySystemSettings();
         this.bindEvents();
 
-        // Auth state listener
+        // Auth state listener — the single source of truth for "who is logged in".
         firebase.auth().onAuthStateChanged(async (fbUser) => {
             if (auth.isMigrating) return;
 
             if (fbUser) {
                 console.log('[App] 👤 Auth State: Logged in as', fbUser.email);
                 auth.enforceSingleSession(fbUser.uid);
-                
+
                 if (!store.getUserByFirebaseUid(fbUser.uid)) {
                     await store.fetchUserByUid(fbUser.uid);
                 }
@@ -34,12 +43,17 @@ const App = {
                     store.updateUserLogin(user.id);
                     this.setupActivityTracking(user.id);
                 }
+            } else {
+                this._renderedUserId = null; // signed out — next login must render fresh
             }
             this.checkAuthAndRender();
         });
 
-        // Fail-safe: Hide overlay if stuck
-        setTimeout(() => this.hideGlobalLoader(), 5000);
+        // Fail-safe: hide the overlay if we somehow never finish a render.
+        // Never yank it away while a render is still in flight.
+        setTimeout(() => {
+            if (!this._rendering) this.hideGlobalLoader();
+        }, 15000);
     },
 
     applySystemSettings() {
@@ -238,9 +252,16 @@ const App = {
     showGlobalLoader(message = 'Syncing your workspace...') {
         const loader = document.getElementById('global-loader');
         if (loader) {
+            // Cancel a pending hide: without this, a hide followed by a show within
+            // 500ms let the old timer mark the freshly-shown loader as hidden.
+            if (this._loaderHideTimer) {
+                clearTimeout(this._loaderHideTimer);
+                this._loaderHideTimer = null;
+            }
+
             const textElement = loader.querySelector('p');
             if (textElement) textElement.textContent = message;
-            
+
             loader.classList.remove('hidden');
             // Small delay to ensure opacity transition works if just added
             setTimeout(() => loader.classList.remove('opacity-0'), 10);
@@ -251,11 +272,38 @@ const App = {
         const loader = document.getElementById('global-loader');
         if (loader) {
             loader.classList.add('opacity-0');
-            setTimeout(() => loader.classList.add('hidden'), 500); // Wait for transition
+            if (this._loaderHideTimer) clearTimeout(this._loaderHideTimer);
+            this._loaderHideTimer = setTimeout(() => {
+                loader.classList.add('hidden');
+                this._loaderHideTimer = null;
+            }, 500); // Wait for transition
         }
     },
 
+    // Single serialized entry point for rendering the current auth state.
+    // Both callers (the auth-state listener and the login form) funnel through here.
+    // A request that arrives mid-render is coalesced into one follow-up pass instead
+    // of interleaving a second render — which used to double-render the page and
+    // tear down the Firestore listeners the first pass had just attached.
     async checkAuthAndRender() {
+        this._renderPending = true;
+        if (this._rendering) {
+            console.log('[App] ⏳ Render already in flight — coalescing.');
+            return;
+        }
+
+        this._rendering = true;
+        try {
+            while (this._renderPending) {
+                this._renderPending = false;
+                await this._renderAuthState();
+            }
+        } finally {
+            this._rendering = false;
+        }
+    },
+
+    async _renderAuthState() {
         console.log('[App] 🛡️ checkAuthAndRender started. Authenticated:', auth.isAuthenticated());
         const viewLogin = document.getElementById('view-login');
         const viewApp = document.getElementById('view-app');
@@ -263,15 +311,21 @@ const App = {
         if (auth.isAuthenticated()) {
             console.log('[App] 🔓 Showing App View...');
             this.showGlobalLoader();
-            
+
             const fbUser = firebase.auth().currentUser;
             if (fbUser) {
+                // Make sure the profile is loaded BEFORE switching views, otherwise
+                // the app view flashes up and is immediately replaced by the
+                // "Account Setup Incomplete" screen.
+                if (!store.getUserByFirebaseUid(fbUser.uid)) {
+                    await store.fetchUserByUid(fbUser.uid);
+                }
                 await auth.enforceSingleSession(fbUser.uid);
             }
 
             viewLogin.classList.remove('active');
             viewApp.classList.add('active');
-            
+
             // Explicitly hide sidebar on mobile during initial render
             const sidebar = document.getElementById('sidebar');
             const overlay = document.getElementById('sidebar-overlay');
@@ -280,9 +334,10 @@ const App = {
                 overlay.classList.add('hidden');
             }
 
-            this.setupAppView();
+            await this.setupAppView();
         } else {
             console.log('[App] 🔒 Showing Login View...');
+            this._renderedUserId = null;
             this.hideGlobalLoader();
             viewApp.classList.remove('active');
             viewLogin.classList.add('active');
@@ -347,6 +402,15 @@ const App = {
             return;
         }
 
+        // Already rendered for this exact user — don't rebuild the page underneath
+        // them (it would wipe open tabs, pagination and scroll position, and
+        // re-attach the Firestore listeners for no reason).
+        if (this._renderedUserId === user.id && document.getElementById('page-content').childElementCount > 0) {
+            console.log('[App] ✅ View already rendered for this user — skipping rebuild.');
+            this.hideGlobalLoader();
+            return;
+        }
+
         const contentArea = document.getElementById('page-content');
         
         // Set nav menu
@@ -382,11 +446,17 @@ const App = {
         }
 
         this.renderNavMenu(navItems, user.role === 'admin' ? 'reports' : 'dashboard');
+        this._renderedUserId = user.id;
 
         // Start role-based Firestore listeners for this user AFTER initial render
         // so that the reactive UI updates can find the newly-rendered DOM containers.
-        await store.startSync(user);
-        
+        try {
+            await store.startSync(user);
+        } catch (err) {
+            console.error('[App] Initial sync failed:', err);
+            ui.showToast('Some data could not be loaded. Please refresh.', 'error');
+        }
+
         // Hide global loader once sync is complete
         this.hideGlobalLoader();
     },
