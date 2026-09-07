@@ -19,36 +19,84 @@ service cloud.firestore {
         : null;
     }
 
+    // Is this user document the caller's own?
+    // Checks the STORED uid, not the incoming one — see the users/ update rule.
+    // Uses .get(field, default) throughout: legacy user documents have no `uid`
+    // field at all, and a bare resource.data.uid would raise an evaluation error
+    // rather than cleanly evaluating to false.
+    function ownsUserDoc(userId) {
+      return isAuthenticated()
+        && exists(/databases/$(database)/documents/users/$(userId))
+        && get(/databases/$(database)/documents/users/$(userId)).data.get('uid', '') == request.auth.uid;
+    }
+
+    function userDocRole(userId) {
+      return get(/databases/$(database)/documents/users/$(userId)).data.get('role', '');
+    }
+
     // ── ROLES ──────────────────────────────────────────────
+    // This collection decides everyone's role, so a forgeable write here is a
+    // full privilege escalation. Creating a roles doc is only allowed when it
+    // agrees with a user document that ALREADY claims the caller's uid — which
+    // is exactly what the self-repair path in store.fetchUserByUid() does, and
+    // is not something a freshly signed-up account can satisfy.
     match /roles/{uid} {
       allow read: if isAuthenticated() && (request.auth.uid == uid || getUserRole() == 'admin');
-      allow create: if isAuthenticated() && request.auth.uid == uid;
+
+      allow create: if isAuthenticated()
+        && request.auth.uid == uid
+        && request.resource.data.keys().hasAll(['role', 'userId'])
+        && ownsUserDoc(request.resource.data.userId)
+        && request.resource.data.role == userDocRole(request.resource.data.userId);
+
       allow update, delete: if isAuthenticated() && getUserRole() == 'admin';
     }
 
     // ── USERS ──────────────────────────────────────────────
     match /users/{userId} {
-      // Allow empty check and migration lookup without auth
-      allow list: if request.query.limit <= 1 || (isAuthenticated() && request.auth.token.email == resource.data.email);
+      // Reading a user document exposes the mirrored plaintext password, so this
+      // is admin-or-self only. There is deliberately no unauthenticated access:
+      // the old `list: if request.query.limit <= 1` let anyone on the internet
+      // read any single user document without logging in.
+      allow get: if isAuthenticated() && (
+        getUserRole() == 'admin' ||
+        getUserId() == userId ||
+        resource.data.get('uid', '') == request.auth.uid
+      );
 
-      allow read: if isAuthenticated() && (
-        getUserId() == userId || 
-        getUserRole() == 'admin' || 
-        getUserRole() == 'teacher' ||
-        request.auth.token.email.lower() == resource.data.email.lower() ||
-        (exists(/databases/$(database)/documents/users/$(userId)) && resource.data.uid == request.auth.uid)
+      // Queries: the admin console lists everyone; everyone else may only run a
+      // query that is already constrained to their own document
+      // (store.fetchUserByUid's `where('uid','==',myUid)` self-repair lookup).
+      allow list: if isAuthenticated() && (
+        getUserRole() == 'admin' ||
+        resource.data.get('uid', '') == request.auth.uid
       );
-      
-      // Update: Users can update themselves, but CANNOT change their own role.
+
+      // Update: admins may change anything; a user may only touch their own
+      // document, and only the session/activity bookkeeping fields.
+      //
+      // The previous rule keyed off request.resource.data.uid — the value being
+      // WRITTEN, which the caller controls — so any signed-in user could rewrite
+      // any other user's document just by setting uid to their own. It now keys
+      // off resource.data.uid, the value already stored.
+      //
+      // Note this branch does NOT depend on the roles document, because the
+      // other self-update branches in the old rule could never pass (on an
+      // update, request.resource.data is the merged document, so
+      // `!("role" in request.resource.data)` was always false) and every
+      // non-admin write was in practice riding on the uid branch above.
       allow update: if isAuthenticated() && (
-        getUserRole() == 'admin' || 
-        (getUserId() == userId && !("role" in request.resource.data) && !("password" in request.resource.data)) ||
-        // Migration bypass: Allow user to link their own account by setting UID (role must match)
-        (request.resource.data.uid == request.auth.uid && request.resource.data.role == resource.data.role) ||
-        // Allow session update
-        (getUserId() == userId && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['lastSessionId']))
+        getUserRole() == 'admin' ||
+        (
+          resource.data.get('uid', '') == request.auth.uid &&
+          request.resource.data.get('uid', '') == resource.data.get('uid', '') &&
+          request.resource.data.get('role', '') == resource.data.get('role', '') &&
+          request.resource.data.diff(resource.data).affectedKeys().hasOnly([
+            'lastSessionId', 'lastLoginAt', 'lastActiveAt', 'mustChangePassword', 'password'
+          ])
+        )
       );
-      
+
       allow create, delete: if isAuthenticated() && getUserRole() == 'admin';
     }
 
@@ -62,9 +110,10 @@ service cloud.firestore {
 
     // ── SUBJECTS ───────────────────────────────────────────
     match /subjects/{subjectId} {
-      // Allow empty check without auth
-      allow list: if request.query.limit <= 1;
       // All authenticated users can read subjects.
+      // The old `list: if request.query.limit <= 1` existed for the pre-login
+      // "is the database empty?" seed check; that check already swallows a
+      // permission-denied, so it costs nothing and closes another public read.
       allow read: if isAuthenticated();
       // Only admins manage subjects.
       allow write: if getUserRole() == 'admin';
