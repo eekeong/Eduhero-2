@@ -2403,18 +2403,24 @@ const AdminPage = {
                         );
 
                         if (subject && teacher) {
-                            store.addVideo({
-                                title,
-                                description,
-                                year,
-                                month,
-                                videoProvider: 'bunny',
-                                bunnyLibraryId: libId,
-                                bunnyVideoId: vidId,
-                                subjectId: subject.id,
-                                teacherId: teacher.id
-                            });
-                            added++;
+                            try {
+                                await store.addVideo({
+                                    title,
+                                    description,
+                                    year,
+                                    month,
+                                    videoProvider: 'bunny',
+                                    bunnyLibraryId: libId,
+                                    bunnyVideoId: vidId,
+                                    subjectId: subject.id,
+                                    teacherId: teacher.id
+                                });
+                                added++;
+                            } catch (err) {
+                                // A row that failed to save is not an imported row.
+                                console.error('[Admin] Import row failed:', title, err);
+                                errors++;
+                            }
                         } else {
                             errors++;
                         }

@@ -73,8 +73,7 @@ const UploadManager = {
                 videoProvider: 'bunny',
                 bunnyLibraryId: next.data.libraryId,
                 bunnyVideoId: videoId,
-                date: new Date().toISOString(),
-                views: 0
+                date: new Date().toISOString()
             });
 
             const subject = store.getSubjects().find(s => s.id === next.data.subjectId);

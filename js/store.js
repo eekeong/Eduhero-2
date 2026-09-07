@@ -930,17 +930,24 @@ const store = {
         return counts;
     },
 
-    addVideo(video) {
+    // Awaits the write. uploadManager already wrote `await store.addVideo(...)`,
+    // but this returned a plain object, so the await resolved immediately and the
+    // upload was reported as saved before Firestore had confirmed anything — a
+    // failed write left a video that existed only in that browser tab.
+    //
+    // No `views` field: nothing reads it. The counter it belonged to was removed
+    // because writing it pushed the video document to every student listening to
+    // that subject, and each push was a billed read.
+    async addVideo(video) {
         const id = generateId('v');
         const newVideo = {
             id,
             date: new Date().toISOString(),
-            views: 0,
             year: new Date().getFullYear().toString(),
             ...video
         };
         _cache.videos.push(newVideo);
-        db.collection(COLLECTIONS.VIDEOS).doc(id).set(newVideo);
+        await db.collection(COLLECTIONS.VIDEOS).doc(id).set(newVideo);
         return newVideo;
     },
 
@@ -1020,13 +1027,15 @@ const store = {
             console.error('Error in BunnyStream delete sync:', err);
         }
 
-        db.collection(COLLECTIONS.VIDEOS).doc(id).delete();
-        db.collection(COLLECTIONS.COMMENTS).where('videoId', '==', id).get()
-            .then(snap => {
-                const b = db.batch();
-                snap.docs.forEach(d => b.delete(d.ref));
-                return b.commit();
-            });
+        // Awaited: neither of these was, so a delete that failed still removed the
+        // video from the screen and reported success.
+        await db.collection(COLLECTIONS.VIDEOS).doc(id).delete();
+        const comments = await db.collection(COLLECTIONS.COMMENTS).where('videoId', '==', id).get();
+        if (!comments.empty) {
+            const b = db.batch();
+            comments.docs.forEach(d => b.delete(d.ref));
+            await b.commit();
+        }
     },
 
     // ----------------------------------------------------------
@@ -1040,7 +1049,7 @@ const store = {
         const id = generateId('c');
         const newComment = { id, videoId, userId, text, date: new Date().toISOString() };
         _cache.comments.push(newComment);
-        db.collection(COLLECTIONS.COMMENTS).doc(id).set(newComment);
+        newComment.saved = db.collection(COLLECTIONS.COMMENTS).doc(id).set(newComment);
         return newComment;
     },
 
