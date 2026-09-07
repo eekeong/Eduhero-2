@@ -1,4 +1,7 @@
 const TeacherPage = {
+    // Map of videoId -> viewer count, or null until loadViewCounts() is run.
+    _viewCounts: null,
+
     render() {
         return `
             <div id="teacher-dashboard-wrapper" class="space-y-6">
@@ -86,10 +89,10 @@ const TeacherPage = {
                                     <div class="min-w-0">
                                         <div class="text-sm font-medium text-slate-800 truncate">${video.title}</div>
                                         <div class="flex items-center gap-3 mt-0.5 text-[9px] font-bold text-slate-400 uppercase tracking-tighter">
-                                            <!-- Reads the denormalised counter on the video document.
-                                                 store.getVideoViews() counts progress records, which required
-                                                 subscribing to the entire progress collection on every login. -->
-                                            <span><i class="fas fa-eye mr-1"></i>${video.views || 0} VIEWS</span>
+                                            <!-- Viewer counts are loaded on demand (see loadViewCounts).
+                                                 Counting them for every render would mean reading the
+                                                 progress records of every video on every dashboard load. -->
+                                            <span><i class="fas fa-eye mr-1"></i>${TeacherPage._viewCounts ? (TeacherPage._viewCounts.get(video.id) || 0) + ' VIEWS' : '— VIEWS'}</span>
                                             <span><i class="fas fa-calendar-alt mr-1"></i>${new Date(video.date).toLocaleDateString()}</span>
                                         </div>
                                     </div>
@@ -183,8 +186,45 @@ const TeacherPage = {
             </div>`;
         }).join('');
 
-        container.innerHTML = html;
+        const viewCountsBar = this._viewCounts
+            ? ''
+            : `<div class="mb-3 flex justify-end">
+                   <button id="teacher-load-views" onclick="TeacherPage.loadViewCounts()"
+                       class="text-[10px] font-bold uppercase tracking-widest text-indigo-600 hover:text-indigo-800 transition-colors">
+                       <i class="fas fa-eye mr-1"></i>Load view counts
+                   </button>
+               </div>`;
+
+        container.innerHTML = viewCountsBar + html;
         container.setAttribute('data-loaded', 'true');
+    },
+
+    // Viewer counts are read on demand rather than on every render: counting
+    // them means reading the progress records for each video, and this
+    // dashboard renders every video the teacher owns at once.
+    async loadViewCounts() {
+        const btn = document.getElementById('teacher-load-views');
+        if (btn) {
+            btn.disabled = true;
+            btn.innerHTML = '<i class="fas fa-spinner fa-spin mr-1"></i>Loading...';
+        }
+
+        const user = auth.getCurrentUser();
+        const myVideoIds = store.getVideos()
+            .filter(v => v.teacherId === user.id)
+            .map(v => v.id);
+
+        try {
+            this._viewCounts = await store.fetchViewCountsForVideos(myVideoIds);
+            this.renderSubjects();
+        } catch (err) {
+            console.error('[Teacher] Failed to load view counts:', err);
+            ui.showToast('Could not load view counts: ' + (err.message || err), 'error');
+            if (btn) {
+                btn.disabled = false;
+                btn.innerHTML = '<i class="fas fa-eye mr-1"></i>Load view counts';
+            }
+        }
     },
 
     toggleLevel(e, levelId) {

@@ -361,9 +361,9 @@ const StudentPage = {
             }
         }
 
-        store.incrementVideoView(videoId);
-        
-        // Tracking: Opened
+        // Tracking: Opened. The progress record IS the view record — there is no
+        // separate counter on the video document any more (writing one pushed the
+        // document to every student listening to that subject).
         store.trackVideoProgress(user.id, videoId, 'opened');
         
         // Close the previous player properly instead of just ripping the modal out:

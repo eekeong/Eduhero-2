@@ -387,9 +387,9 @@ async function attachRoleListeners(user) {
         promises.push(...subscribeScopedVideos(user));
 
         // NOTE: no progress listener. The teacher dashboard's only use of
-        // progress was a view count per video, which now reads the denormalised
-        // video.views counter instead. Subscribing here meant downloading the
-        // entire progress collection on every teacher login.
+        // progress is a view count per video, which is now loaded on demand via
+        // store.fetchViewCountsForVideos(). Subscribing here meant downloading
+        // the entire progress collection on every teacher login.
 
     // ── STUDENT-only listeners ────────────────────────────────
     } else if (user.role === 'student') {
@@ -441,9 +441,19 @@ const store = {
             console.warn('[Store] ⚠️ Network delay: UI might be temporarily empty.');
         }
 
-        seedIfEmpty(); // Non-blocking
+        // seedIfEmpty() is NOT called here any more. It is a first-deployment
+        // bootstrap, but it ran on every page load for every visitor — three
+        // extra document reads (settings again, users.limit(1),
+        // subjects.limit(1)) just to re-confirm that a database with thousands
+        // of documents is not empty. Across the user base that alone was tens
+        // of thousands of reads a day against a 50k/day quota.
+        //
+        // If a fresh database ever needs seeding, run store.seedIfEmpty() once
+        // from the console as an admin.
         return true;
     },
+
+    seedIfEmpty,
 
     // ----------------------------------------------------------
     // startSync(user) — call after successful login.
@@ -845,14 +855,33 @@ const store = {
         }
     },
 
-    incrementVideoView(id) {
-        const idx = _cache.videos.findIndex(v => v.id === id);
-        if (idx !== -1) {
-            _cache.videos[idx].views = (_cache.videos[idx].views || 0) + 1;
-            db.collection(COLLECTIONS.VIDEOS).doc(id).update({
-                views: firebase.firestore.FieldValue.increment(1)
+    // Count viewers for a specific set of videos, on demand.
+    //
+    // This replaces the old incrementVideoView(), which wrote a `views` counter
+    // onto the video document every time a student opened a video. That
+    // document is inside the realtime query every student in the subject is
+    // listening to, so each increment pushed the updated document to every
+    // connected student — one billed read each — and before this change nothing
+    // in the app displayed video.views at all. Progress records already record
+    // who watched what.
+    async fetchViewCountsForVideos(videoIds) {
+        const counts = new Map();
+        const ids = [...new Set((videoIds || []).filter(Boolean))];
+        if (ids.length === 0) return counts;
+        ids.forEach(id => counts.set(id, 0));
+
+        // The compat SDK caps an 'in' filter at 10 values.
+        for (let i = 0; i < ids.length; i += 10) {
+            const chunk = ids.slice(i, i + 10);
+            const snap = await db.collection(COLLECTIONS.PROGRESS)
+                .where('videoId', 'in', chunk)
+                .get();
+            snap.docs.forEach(doc => {
+                const videoId = doc.data().videoId;
+                counts.set(videoId, (counts.get(videoId) || 0) + 1);
             });
         }
+        return counts;
     },
     async deleteVideo(id) {
         _cache.videos = _cache.videos.filter(v => v.id !== id);
