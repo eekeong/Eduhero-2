@@ -145,7 +145,7 @@ const AdminPage = {
                                         </div>
                                     </div>
                                     <div>
-                                        <label class="block text-sm font-medium text-gray-700 mb-1">Logo</label>
+                                        <label class="block text-sm font-medium text-gray-700 mb-1">Logo <span class="font-normal text-gray-400">(auto-compressed)</span></label>
                                         <div class="flex items-center gap-4">
                                             <div id="settings-logo-preview" class="w-16 h-16 rounded-lg bg-gray-100 border border-gray-200 flex items-center justify-center overflow-hidden">
                                                 <i class="fas fa-image text-gray-400" id="settings-logo-icon"></i>
@@ -159,7 +159,7 @@ const AdminPage = {
                                         </div>
                                     </div>
                                     <div>
-                                        <label class="block text-sm font-medium text-gray-700 mb-1">Default Student Avatar</label>
+                                        <label class="block text-sm font-medium text-gray-700 mb-1">Default Student Avatar <span class="font-normal text-gray-400">(auto-compressed)</span></label>
                                         <div class="flex items-center gap-4">
                                             <div id="settings-student-avatar-preview" class="w-16 h-16 rounded-full bg-gray-100 border border-gray-200 flex items-center justify-center overflow-hidden">
                                                 <i class="fas fa-user-graduate text-gray-400" id="settings-student-avatar-icon"></i>
@@ -476,19 +476,150 @@ const AdminPage = {
         }
     },
 
-    // Read an image file into a base64 data URL for the settings doc.
-    // Firestore caps a document at 1MB and base64 inflates a file by ~33%, so the
-    // real ceiling is well under 1MB — a larger file used to fail the write silently.
+    // Per-image budget for the settings document.
+    //
+    // logoUrl and studentAvatarUrl are base64 data URLs held as fields on the SAME
+    // document (settings/main), and Firestore caps a document at ~1MB. Two
+    // full-size uploads blow past that and the ENTIRE write fails, taking the
+    // colours and the system name down with them. So each image is resized and
+    // re-encoded in the browser until it fits its own budget; together they leave
+    // ample headroom for the rest of the document.
+    _IMAGE_BUDGET: {
+        Logo:   { maxDim: 512, maxBytes: 300 * 1024 },
+        Avatar: { maxDim: 256, maxBytes: 200 * 1024 }
+    },
+
+    // Does the image actually use transparency? A logo usually does and a photo
+    // never does, and that decides whether JPEG (much smaller, but opaque) is
+    // allowed or an alpha-capable format is required.
+    _canvasHasAlpha(canvas) {
+        try {
+            const { data } = canvas.getContext('2d').getImageData(0, 0, canvas.width, canvas.height);
+            for (let i = 3; i < data.length; i += 4) {
+                if (data[i] < 255) return true;
+            }
+        } catch (e) {
+            return true; // unreadable — assume alpha rather than flattening a logo
+        }
+        return false;
+    },
+
+    _supportsWebp() {
+        if (this.__webpSupported === undefined) {
+            const probe = document.createElement('canvas');
+            probe.width = probe.height = 1;
+            this.__webpSupported = probe.toDataURL('image/webp').indexOf('data:image/webp') === 0;
+        }
+        return this.__webpSupported;
+    },
+
+    // Resize and re-encode until the resulting data URL fits maxBytes. A data URL
+    // is ASCII, so its length in characters is its size in bytes on the document.
+    // Throws if nothing fits — returning an oversized image would only move the
+    // failure to the save button.
+    _encodeWithinBudget(img, budget) {
+        const w0 = img.naturalWidth || img.width;
+        const h0 = img.naturalHeight || img.height;
+        if (!w0 || !h0) throw new Error('has no readable dimensions.');
+
+        const QUALITIES = [0.92, 0.85, 0.75, 0.65, 0.55, 0.45];
+        const canvas = document.createElement('canvas');
+        const ctx2d = canvas.getContext('2d');
+        let scale = Math.min(1, budget.maxDim / Math.max(w0, h0));
+        let type = null;
+
+        // Each pass drops the longest edge by 20%, so eight passes cover a ~5x
+        // linear reduction. Anything that still will not fit is not an image the
+        // settings document can hold.
+        for (let pass = 0; pass < 8; pass++) {
+            canvas.width = Math.max(1, Math.round(w0 * scale));
+            canvas.height = Math.max(1, Math.round(h0 * scale));
+            ctx2d.clearRect(0, 0, canvas.width, canvas.height);
+            ctx2d.drawImage(img, 0, 0, canvas.width, canvas.height);
+
+            if (type === null) {
+                // Decided once: resizing never adds or removes transparency.
+                // Transparency has to survive, so an image with alpha goes to
+                // WebP (lossy AND alpha) and falls back to PNG where WebP cannot
+                // be written. An opaque image goes to JPEG.
+                type = this._canvasHasAlpha(canvas)
+                    ? (this._supportsWebp() ? 'image/webp' : 'image/png')
+                    : 'image/jpeg';
+            }
+
+            if (type === 'image/png') {
+                const url = canvas.toDataURL('image/png'); // no quality knob
+                if (url.length <= budget.maxBytes) return url;
+            } else {
+                for (let i = 0; i < QUALITIES.length; i++) {
+                    const url = canvas.toDataURL(type, QUALITIES[i]);
+                    if (url.length <= budget.maxBytes) return url;
+                }
+            }
+            scale *= 0.8;
+        }
+
+        throw new Error('could not be compressed small enough. Try a simpler image.');
+    },
+
+    // Read an image file and compress it to fit the settings document. Oversized
+    // files used to be rejected outright; they are now shrunk to fit, and only a
+    // file that is unreadable or hopeless is refused.
     _readImageForSettings(input, label, onLoaded) {
         const file = input.files[0];
         if (!file) return;
-        if (file.size > 700 * 1024) {
-            ui.showToast(`${label} must be less than 700KB (Firestore document limit)`, 'error');
+
+        const budget = this._IMAGE_BUDGET[label] || this._IMAGE_BUDGET.Logo;
+        const fail = (message) => {
+            ui.showToast(`${label} ${message}`, 'error');
             input.value = '';
+        };
+
+        // A guard against pathological input only — decoding a 100MP image can
+        // exhaust memory. Everything under this is compressed, not rejected.
+        if (file.size > 20 * 1024 * 1024) {
+            fail('is too large to process (max 20MB).');
             return;
         }
+
         const reader = new FileReader();
-        reader.onload = (event) => onLoaded(event.target.result);
+        reader.onerror = () => fail('could not be read.');
+        reader.onload = (event) => {
+            const src = event.target.result;
+
+            // SVG is already compact and scales perfectly; rasterising it would
+            // only make it worse, so it is stored verbatim when it fits.
+            if (file.type === 'image/svg+xml') {
+                if (src.length > budget.maxBytes) {
+                    fail(`is too large even as SVG (max ${Math.round(budget.maxBytes / 1024)}KB).`);
+                    return;
+                }
+                onLoaded(src);
+                return;
+            }
+
+            const img = new Image();
+            img.onerror = () => fail('is not a readable image.');
+            img.onload = () => {
+                // Already within both the pixel and byte budget: keep the original
+                // bytes rather than re-encoding and losing quality for nothing.
+                if (src.length <= budget.maxBytes &&
+                    Math.max(img.naturalWidth, img.naturalHeight) <= budget.maxDim) {
+                    onLoaded(src);
+                    return;
+                }
+                let out;
+                try {
+                    out = this._encodeWithinBudget(img, budget);
+                } catch (err) {
+                    fail(err.message || String(err));
+                    return;
+                }
+                ui.showToast(`${label} compressed: ${Math.round(file.size / 1024)}KB → ${Math.round(out.length / 1024)}KB`);
+                onLoaded(out);
+            };
+            img.src = src;
+        };
         reader.readAsDataURL(file);
     },
 
