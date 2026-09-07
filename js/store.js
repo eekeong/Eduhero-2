@@ -170,14 +170,30 @@ function applyScopedVideos() {
 }
 
 // Returns an array of promises that resolve once each chunk's first snapshot
-// has arrived. Safe to call again when the user's subjects change — it is a
-// no-op if the scope is unchanged.
+// has arrived. Safe to call again when the user's subjects or granted months
+// change — it is a no-op if the resulting scope is unchanged.
+//
+// Students are additionally scoped to the MONTHS they have been granted. A
+// student assigned two subjects was fetching every video in both, across every
+// month those subjects have ever had: 111 documents where 24 were accessible,
+// so 78% of the fetch was for content the month check would refuse to play
+// anyway. Teachers are not month-scoped — they manage their subjects and need
+// every month to edit and delete.
 function subscribeScopedVideos(user) {
     const subjectIds = [...new Set((user.subjects || []).filter(Boolean))];
-    const scopeKey = subjectIds.slice().sort().join('|');
+    const isStudent = user.role === 'student';
+    const grantedMonths = user.months || {};
+
+    // The key has to include the months for a student, so that granting a new
+    // month re-scopes the listener instead of being treated as no change.
+    const scopeKey = isStudent
+        ? subjectIds.slice().sort()
+            .map(id => id + ':' + [...(grantedMonths[id] || [])].sort().join(','))
+            .join('|')
+        : subjectIds.slice().sort().join('|');
 
     if (_scopedVideos.scopeKey === scopeKey && _scopedVideos.unsubs.length) {
-        return []; // already listening to exactly this set of subjects
+        return []; // already listening to exactly this scope
     }
 
     releaseScopedVideoSubs();
@@ -189,8 +205,38 @@ function subscribeScopedVideos(user) {
         return [];
     }
 
-    // The compat SDK caps an 'in' filter at 10 values, so split the subject
-    // list and merge the results.
+    if (isStudent) {
+        // One query per subject per chunk of 10 months. Firestore allows only
+        // one 'in' filter per query, so the subject is an equality filter and
+        // the months are the disjunction. Equality-only queries like this need
+        // no composite index — verified against the live database.
+        const specs = [];
+        subjectIds.forEach(id => {
+            const months = [...new Set((grantedMonths[id] || []).filter(Boolean))];
+            // No months granted for this subject means nothing is watchable in
+            // it, so there is nothing worth fetching.
+            chunkArray(months, 10).forEach(chunk => specs.push({ id, chunk }));
+        });
+
+        if (specs.length === 0) {
+            applyScopedVideos();
+            return [];
+        }
+
+        return specs.map((spec, index) => waitForSnapshot(
+            db.collection(COLLECTIONS.VIDEOS)
+                .where('subjectId', '==', spec.id)
+                .where('month', 'in', spec.chunk),
+            snap => {
+                _scopedVideos.chunks.set(index, snap.docs.map(docToObj));
+                applyScopedVideos();
+            },
+            _scopedVideos.unsubs
+        ));
+    }
+
+    // Teachers: every video in their own subjects. The compat SDK caps an 'in'
+    // filter at 10 values, so split the subject list and merge the results.
     return chunkArray(subjectIds, 10).map((ids, index) => waitForSnapshot(
         db.collection(COLLECTIONS.VIDEOS).where('subjectId', 'in', ids),
         snap => {
