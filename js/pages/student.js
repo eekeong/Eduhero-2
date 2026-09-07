@@ -431,6 +431,7 @@ const StudentPage = {
         this._currentVideoId = null;
         this._currentPercentage = 0;
         this._milestonesReached = new Set();
+        this._bunnyEventsSeen = false;
 
         modal.remove();
         if (document.fullscreenElement) document.exitFullscreen().catch(() => {});
@@ -455,6 +456,7 @@ const StudentPage = {
         if (!iframe) return;
 
         let hasStarted = false;
+        this._bunnyEventsSeen = false;
 
         this._bunnyListener = (event) => {
             if (!event.origin.includes('bunny.net') && !event.origin.includes('mediadelivery.net')) return;
@@ -463,6 +465,9 @@ const StudentPage = {
                 const message = typeof event.data === 'string' ? JSON.parse(event.data) : event.data;
                 
                 if (message.context !== 'player.js') return;
+
+                // Something is coming back, so the subscription took: stop retrying.
+                this._bunnyEventsSeen = true;
 
                 if (message.event === 'play' && !hasStarted) {
                     hasStarted = true;
@@ -483,17 +488,58 @@ const StudentPage = {
         };
 
         window.addEventListener('message', this._bunnyListener);
+
+        // player.js is a SUBSCRIBE protocol: the player emits nothing until the
+        // embedding page asks for each event by name. This handshake was never
+        // sent, so play / timeupdate / ended never arrived — which is why every
+        // progress record written before this fix has watchPercentage 0, no
+        // milestones, and a null startedAt and completedAt. Only 'opened' and
+        // 'closed', which the app raises itself, ever recorded anything.
+        const subscribe = () => {
+            if (!iframe.contentWindow) return;
+            ['play', 'timeupdate', 'ended'].forEach(ev => {
+                iframe.contentWindow.postMessage(JSON.stringify({
+                    context: 'player.js',
+                    version: '0.0.11',
+                    method: 'addEventListener',
+                    value: ev,
+                    listener: `eduhero_${ev}`
+                }), '*');
+            });
+        };
+
+        // The player installs its own message handler some time after the iframe
+        // load event, and a subscription sent before that is simply dropped. So
+        // subscribe on load and keep retrying briefly until an event comes back.
+        iframe.addEventListener('load', subscribe);
+        subscribe();
+
+        let attempts = 0;
+        const handshake = setInterval(() => {
+            if (this._bunnyEventsSeen || ++attempts > 20) {
+                clearInterval(handshake);
+                return;
+            }
+            subscribe();
+        }, 500);
+
+        // Registered so closeVideo() -> ui.releaseVideoGuards() stops it even if
+        // the player never answers.
+        ui._registerVideoGuard(videoId, { interval: handshake });
     },
 
 
 
     checkMilestones(studentId, videoId, percentage) {
-        // Trigger a database update every 5% of progress to capture exact percentage
-        // without spamming the database on every single second.
-        const bucket = Math.floor(percentage / 5) * 5; 
+        // One write per quarter watched. This used to be every 5%, which is ~20
+        // writes per video, and each one is pushed straight back to the student's
+        // own progress listener as a billed read. The exact final percentage is
+        // still recorded: closeVideo() writes this._currentPercentage on the way
+        // out, so the quarters are checkpoints, not the resolution of the data.
+        const bucket = Math.floor(percentage / 25) * 25;
         if (bucket > 0 && bucket <= 100 && !this._milestonesReached.has(bucket.toString())) {
             this._milestonesReached.add(bucket.toString());
-            store.trackVideoProgress(studentId, videoId, 'milestone', { percentage: percentage });
+            store.trackVideoProgress(studentId, videoId, 'milestone', { percentage: bucket });
         }
 
         // Completion threshold: 90%
