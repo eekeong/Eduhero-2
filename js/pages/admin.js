@@ -391,6 +391,19 @@ const AdminPage = {
         this.syncSettingsForm();
         this.setupTabs();
         this.bindSettingsForm();
+
+        // One document read for the four cards, instead of the 8252 documents
+        // they used to cost. It is rewritten from the real collections whenever
+        // the admin opens a screen that loads them.
+        store.fetchCounts()
+            .then(counts => {
+                this.renderStats();
+                // First run only: the counts document does not exist yet, so load
+                // the collections once to create it. ensureAdminData() writes it,
+                // so this branch cannot repeat.
+                if (!counts) return store.ensureAdminData();
+            })
+            .catch(err => console.error('[Admin] Could not load counts:', err));
     },
 
     // refresh() — redraw the lists from the current store cache.
@@ -602,13 +615,26 @@ const AdminPage = {
 
                 // Activity Log: fetch fresh data from Firestore on-demand
                 // (no persistent listener — saves Firebase reads)
-                if (tab.dataset.tab === 'log') {
+                const tabId = tab.dataset.tab;
+
+                if (tabId === 'log') {
                     const logContainer = document.getElementById('admin-activity-log');
                     if (logContainer) logContainer.innerHTML = `<div class="text-center py-8 text-gray-400"><i class="fas fa-spinner fa-spin text-2xl"></i><p class="mt-2 text-sm">Loading logs...</p></div>`;
                     store.fetchActivityLog().then(() => AdminPage.renderActivityLog());
+                    return;
                 }
                 
-                if (tab.dataset.tab === 'reports') {
+                // Users and Videos read collections that are no longer loaded at
+                // login, so they pull them on first open.
+                //
+                // Reports is deliberately NOT in this list. It is the default
+                // view and the sidebar clicks its tab on every login, so loading
+                // here would put both collections straight back on the landing
+                // page. It shows only the "Load report data" prompt until that
+                // button is pressed, and loadReportData() pulls what it needs.
+                if (tabId === 'users' || tabId === 'videos') {
+                    AdminPage.withAdminData(() => AdminPage.refresh(), tabId);
+                } else if (tabId === 'reports') {
                     AdminPage.renderReports();
                 }
             });
@@ -917,12 +943,15 @@ const AdminPage = {
         const container = document.getElementById('admin-stats');
         if (!container) return;
 
-        const users = store.getUsers();
+        // Counts come from a cached counts document, not from the collections
+        // themselves — the cards used to be the only reason an admin page load
+        // downloaded 5031 users and 3221 videos. They become exact again as soon
+        // as any screen loads the real data.
+        const counts = store.getCounts();
         const subjects = store.getSubjects();
-        const videos = store.getVideos();
 
-        // Show loading skeletons if data hasn't synced yet
-        if (!store.areUsersLoaded()) {
+        // Show loading skeletons if the counts have not arrived yet
+        if (!counts) {
             container.innerHTML = `
                 <div class="bg-white p-6 rounded-xl border border-gray-100 shadow-sm flex items-center justify-between animate-pulse">
                     <div class="flex items-center">
@@ -964,8 +993,9 @@ const AdminPage = {
             return;
         }
 
-        const students = users.filter(u => u.role === 'student').length;
-        const teachers = users.filter(u => u.role === 'teacher').length;
+        const students = counts.students;
+        const teachers = counts.teachers;
+        const videoCount = counts.videos;
 
         const statsHtml = `
             <div class="bg-white p-4 rounded-xl shadow-sm border border-gray-100 flex items-center">
@@ -982,14 +1012,38 @@ const AdminPage = {
             </div>
             <div class="bg-white p-4 rounded-xl shadow-sm border border-gray-100 flex items-center">
                 <div class="p-3 bg-rose-50 text-rose-600 rounded-lg"><i class="fas fa-video text-xl"></i></div>
-                <div class="ml-4"><p class="text-sm text-gray-500">Videos</p><p class="text-2xl font-bold text-gray-800">${videos.length}</p></div>
+                <div class="ml-4"><p class="text-sm text-gray-500">Videos</p><p class="text-2xl font-bold text-gray-800">${videoCount}</p></div>
             </div>
         `;
         document.getElementById('admin-stats').innerHTML = statsHtml;
     },
 
-    // Users and videos are read once at login rather than subscribed to, so
-    // this is how an admin picks up changes made by someone else.
+    // Runs `then` once the users and videos collections are in memory. They are
+    // fetched the first time a screen actually needs them rather than at login,
+    // so an admin who opens the dashboard and leaves never pays for them.
+    withAdminData(then, tabId) {
+        if (store.isAdminDataLoaded()) return then();
+
+        const pane = tabId ? document.getElementById(`tab-${tabId}`) : null;
+        if (pane && !document.getElementById('admin-data-loading')) {
+            pane.insertAdjacentHTML('afterbegin',
+                '<div id="admin-data-loading" class="text-center py-12 text-gray-400"><i class="fas fa-spinner fa-spin text-2xl"></i><p class="mt-3 text-sm">Loading data...</p></div>');
+        }
+
+        if (!this._adminDataLoading) {
+            this._adminDataLoading = store.ensureAdminData().finally(() => {
+                this._adminDataLoading = null;
+                document.querySelectorAll('#admin-data-loading').forEach(el => el.remove());
+            });
+        }
+        this._adminDataLoading.then(then).catch(err => {
+            console.error('[Admin] Could not load admin data:', err);
+            ui.showToast(err.message || 'Could not load data — please retry', 'error');
+        });
+    },
+
+    // Users and videos are read once on first need rather than subscribed to,
+    // so this is how an admin picks up changes made by someone else.
     async reloadData() {
         const btn = document.getElementById('admin-refresh-btn');
         if (btn) {
@@ -1026,6 +1080,9 @@ const AdminPage = {
             btn.innerHTML = '<i class="fas fa-spinner fa-spin mr-2"></i>Loading...';
         }
         try {
+            // The report reads users and videos too, and neither is loaded at
+            // login any more.
+            await store.ensureAdminData();
             await store.fetchAllProgress();
             this.renderReports();
         } catch (err) {
@@ -1253,6 +1310,15 @@ const AdminPage = {
         document.getElementById('tab-users').scrollIntoView({ behavior: 'smooth', block: 'start' });
     },
     renderSubjects() {
+        // The subjects listener calls this on every snapshot, including at login
+        // while the view is hidden — fetching there would pull users and videos
+        // right back onto the login path. Only load when it is actually visible.
+        const wrapper = document.getElementById('admin-subjects-wrapper');
+        if (wrapper && !wrapper.classList.contains('hidden') && !store.isAdminDataLoaded()) {
+            this.withAdminData(() => this.renderSubjects());
+            return;
+        }
+
         const subjects = store.getSubjects();
         const allVideos = store.getVideos();
         const allUsers = store.getUsers();

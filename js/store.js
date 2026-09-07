@@ -34,7 +34,9 @@ const _cache = {
     ready:       false,
     listeners:   [],  // array of unsubscribe functions
     initialUsersLoaded: false,
-    progressLoaded: false
+    progressLoaded: false,
+    adminDataLoaded: false,
+    counts: null
 };
 
 // ── Helpers ──────────────────────────────────────────────────
@@ -211,32 +213,52 @@ function subscribeScopedVideos(user) {
 // stays correct after the admin's own actions. The Refresh button re-reads when
 // they want to pick up other people's changes.
 async function loadAdminUsers() {
-    try {
-        const snap = await db.collection(COLLECTIONS.USERS).get();
-        _cache.users = snap.docs.map(docToObj);
-        _cache.initialUsersLoaded = true;
-        if (typeof AdminPage !== 'undefined' && document.getElementById('admin-users-list')) {
-            AdminPage.renderUsers();
-            AdminPage.renderSubjects(); // teacher counts in the subjects list
-            AdminPage.renderStats();
-        }
-    } catch (err) {
-        console.error('[Store] Could not load users:', err);
-    }
+    const snap = await db.collection(COLLECTIONS.USERS).get();
+    _cache.users = snap.docs.map(docToObj);
+    _cache.initialUsersLoaded = true;
 }
 
 async function loadAdminVideos() {
+    const snap = await db.collection(COLLECTIONS.VIDEOS).get();
+    _cache.videos = snap.docs.map(docToObj);
+}
+
+// Counts for the dashboard cards, without downloading the collections.
+//
+// Aggregation queries are not an option here: count() exists only in the
+// modular SDK (never in compat, at any version), the modular build cannot be
+// pointed at the compat instance because gstatic ships them as separate module
+// instances, and the REST aggregation endpoint answers RESOURCE_EXHAUSTED on
+// this project while ordinary reads still succeed.
+//
+// So the counts live in a single document that costs one read. It is rewritten
+// from the real collections every time the admin actually loads them — opening
+// Users, Videos or Reports, or pressing Refresh — so it self-heals on any
+// normal use of the console and needs no bookkeeping on individual writes.
+async function readCounts() {
+    const doc = await db.collection(COLLECTIONS.SETTINGS).doc('counts').get();
+    _cache.counts = doc.exists ? doc.data() : null;
+    return _cache.counts;
+}
+
+async function writeCountsFromLoadedData() {
+    // No subjects entry: that collection is always in memory (108 documents on
+    // a listener every role already has) so the card reads it live. Writing it
+    // here also produced a wrong number, because the counts are written as soon
+    // as users and videos land, which can precede the subjects snapshot.
+    const counts = {
+        students: _cache.users.filter(u => u.role === 'student').length,
+        teachers: _cache.users.filter(u => u.role === 'teacher').length,
+        videos: _cache.videos.length,
+        updatedAt: new Date().toISOString()
+    };
+    _cache.counts = counts;
     try {
-        const snap = await db.collection(COLLECTIONS.VIDEOS).get();
-        _cache.videos = snap.docs.map(docToObj);
-        if (typeof AdminPage !== 'undefined' && document.getElementById('admin-videos-list')) {
-            AdminPage.renderVideos();
-            AdminPage.renderSubjects(); // video counts in the subjects list
-            AdminPage.renderStats();
-        }
+        await db.collection(COLLECTIONS.SETTINGS).doc('counts').set(counts);
     } catch (err) {
-        console.error('[Store] Could not load videos:', err);
+        console.warn('[Store] Could not cache dashboard counts:', err);
     }
+    return counts;
 }
 
 function waitForSnapshot(query, callback, unsubsArray) {
@@ -381,13 +403,13 @@ async function attachRoleListeners(user) {
 
     // ── ADMIN-only data: one-time reads, see loadAdminUsers() above ──
     if (user.role === 'admin') {
-        promises.push(loadAdminUsers());
-        promises.push(loadAdminVideos());
-        // NOTE: activityLog has NO listener — fetched on-demand only.
-        // NOTE: progress has neither a listener nor an eager read. It is the
-        // largest collection in the system, and the only things that read it are
-        // the Learning Reports tab and the per-student reset, both of which now
-        // fetch it themselves.
+        // Nothing eager. The dashboard lands on a view that needs no collection,
+        // so an admin who opens the app and leaves pays for the shared listeners
+        // and four count queries — not 8000+ documents.
+        //
+        // store.ensureAdminData() pulls users + videos the first time a screen
+        // actually needs them; the reports tab and the activity log fetch their
+        // own data on demand.
 
     // ── TEACHER-only listeners ────────────────────────────────
     } else if (user.role === 'teacher') {
@@ -1139,11 +1161,41 @@ const store = {
         return snap.docs.map(docToObj);
     },
 
+    // Users and videos, fetched once and then reused. Every admin screen that
+    // needs either of them awaits this first.
+    async ensureAdminData() {
+        if (_cache.adminDataLoaded) return;
+        await Promise.all([loadAdminUsers(), loadAdminVideos()]);
+        _cache.adminDataLoaded = true;
+        // The collections are in memory now, so the cards can be made exact
+        // again for free.
+        await writeCountsFromLoadedData();
+        if (typeof AdminPage !== 'undefined' && document.getElementById('admin-stats')) {
+            AdminPage.renderStats();
+        }
+    },
+
+    isAdminDataLoaded() {
+        return !!_cache.adminDataLoaded;
+    },
+
+    // Dashboard cards: one document read per admin page load.
+    async fetchCounts() {
+        return readCounts();
+    },
+
+    getCounts() {
+        return _cache.counts;
+    },
+
     // Re-read what the admin screen shows. These are no longer live listeners,
     // so the Refresh button is how an admin picks up other people's changes.
     async refreshAdminData() {
         _cache.progressLoaded = false;
-        await Promise.all([loadAdminUsers(), loadAdminVideos()]);
+        _cache.adminDataLoaded = false;
+        // ensureAdminData() rewrites the counts document from the freshly
+        // loaded collections, so there is nothing else to refresh.
+        await this.ensureAdminData();
     },
 
     getProgressRecords() {
