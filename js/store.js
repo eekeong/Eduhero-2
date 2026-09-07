@@ -201,6 +201,72 @@ function subscribeScopedVideos(user) {
     ));
 }
 
+// Subject-scoped SUBJECT listeners (students & teachers)
+//
+// Every non-admin use of store.getSubjects() immediately filters the result down
+// to the user's own assignment — see StudentPage.renderSubjects() and
+// TeacherPage.renderSubjects(). But all roles subscribed to the whole
+// collection, so a student assigned two subjects still downloaded all 108 on
+// every login. That was 48% of everything a student login cost.
+const _scopedSubjects = { unsubs: [], chunks: new Map(), scopeKey: null, role: null };
+
+function releaseScopedSubjectSubs() {
+    _scopedSubjects.unsubs.forEach(unsub => {
+        try { unsub(); } catch (e) {}
+    });
+    _scopedSubjects.unsubs = [];
+    _scopedSubjects.chunks.clear();
+    _scopedSubjects.scopeKey = null;
+    _scopedSubjects.role = null;
+}
+
+function applyScopedSubjects() {
+    const merged = new Map();
+    _scopedSubjects.chunks.forEach(list => list.forEach(s => merged.set(s.id, s)));
+    _cache.subjects = [...merged.values()];
+
+    if (_scopedSubjects.role === 'teacher') {
+        const container = document.getElementById('teacher-levels-list');
+        if (typeof TeacherPage !== 'undefined' && container && !container.hasAttribute('data-loaded')) {
+            TeacherPage.renderSubjects();
+        }
+    } else if (typeof StudentPage !== 'undefined' && document.getElementById('student-dashboard-wrapper')) {
+        if (document.getElementById('student-subjects')) StudentPage.renderSubjects();
+    }
+}
+
+// Same shape as subscribeScopedVideos: returns a promise per chunk, and is a
+// no-op when the user's subject assignment has not actually changed.
+function subscribeScopedSubjects(user) {
+    const ids = [...new Set((user.subjects || []).filter(Boolean))];
+    const scopeKey = ids.slice().sort().join('|');
+
+    if (_scopedSubjects.scopeKey === scopeKey && _scopedSubjects.unsubs.length) {
+        return [];
+    }
+
+    releaseScopedSubjectSubs();
+    _scopedSubjects.scopeKey = scopeKey;
+    _scopedSubjects.role = user.role;
+
+    if (ids.length === 0) {
+        applyScopedSubjects(); // nothing assigned yet
+        return [];
+    }
+
+    // Queried by document id, chunked at 10 because the compat SDK caps an
+    // 'in' filter at 10 values.
+    const docId = firebase.firestore.FieldPath.documentId();
+    return chunkArray(ids, 10).map((chunk, index) => waitForSnapshot(
+        db.collection(COLLECTIONS.SUBJECTS).where(docId, 'in', chunk),
+        snap => {
+            _scopedSubjects.chunks.set(index, snap.docs.map(docToObj));
+            applyScopedSubjects();
+        },
+        _scopedSubjects.unsubs
+    ));
+}
+
 // Admin data is READ ONCE, not subscribed to.
 //
 // A collection listener is billed for its initial load and then again for every
@@ -315,34 +381,25 @@ async function attachRoleListeners(user) {
         ));
     }
 
-    // ── SUBJECTS (all roles) ──────────────────────────────────
-    // Small collection (~77 docs), needed by all roles
-    promises.push(waitForSnapshot(
-        db.collection(COLLECTIONS.SUBJECTS),
-        snap => {
-            _cache.subjects = snap.docs.map(docToObj);
-            // Reactive UI updates for all roles
-            if (typeof AdminPage !== 'undefined' && typeof AdminPage.renderSubjects === 'function' && document.getElementById('admin-subjects-main')) {
-                AdminPage.renderSubjects();
-                AdminPage.renderStats();
-            }
-            // Smart refresh for Teacher: Only render if not loaded yet
-            if (typeof TeacherPage !== 'undefined' && document.getElementById('teacher-levels-list')) {
-                const container = document.getElementById('teacher-levels-list');
-                if (!container.hasAttribute('data-loaded')) {
-                    TeacherPage.renderSubjects();
+    // ── SUBJECTS ──────────────────────────────────────────────
+    // Admin manages every subject, so it needs the whole collection. Students
+    // and teachers only ever render their own assignment, so they subscribe to
+    // just those documents — see subscribeScopedSubjects() above.
+    if (user.role === 'admin') {
+        promises.push(waitForSnapshot(
+            db.collection(COLLECTIONS.SUBJECTS),
+            snap => {
+                _cache.subjects = snap.docs.map(docToObj);
+                if (typeof AdminPage !== 'undefined' && typeof AdminPage.renderSubjects === 'function' && document.getElementById('admin-subjects-main')) {
+                    AdminPage.renderSubjects();
+                    AdminPage.renderStats();
                 }
-            }
-            // Smart refresh for Student
-            if (typeof StudentPage !== 'undefined' && document.getElementById('student-dashboard-wrapper')) {
-                const container = document.getElementById('student-subjects');
-                if (container) {
-                    StudentPage.renderSubjects();
-                }
-            }
-        },
-        unsubs
-    ));
+            },
+            unsubs
+        ));
+    } else {
+        promises.push(...subscribeScopedSubjects(user));
+    }
 
     // ── CURRENT USER DATA (all roles) ────────────────────────
     // Exactly one document. Students and teachers need it for subject/month
@@ -380,11 +437,12 @@ async function attachRoleListeners(user) {
                     if (typeof auth !== 'undefined') auth.checkSession(userData);
 
                     if (hasSignificantChange && user.role !== 'admin') {
-                        // Admin has no scoped video listener — it reads the whole
-                        // collection once instead.
-                        // The video listeners are scoped to this user's subjects,
-                        // so a change in that assignment has to re-scope them.
-                        // No-op when the subject list is actually unchanged.
+                        // Admin has no scoped listeners — it reads the whole
+                        // collections instead. For everyone else both the subject
+                        // and video listeners are scoped to this user's
+                        // assignment, so a change to it has to re-scope them.
+                        // Both are no-ops when the list is actually unchanged.
+                        subscribeScopedSubjects(userData);
                         subscribeScopedVideos(userData);
 
                         // Smart UI updates
@@ -503,7 +561,9 @@ const store = {
             try { unsub(); } catch(e) {}
         });
         _cache.listeners = [];
-        releaseScopedVideoSubs(); // subject-scoped video listeners live outside _cache.listeners
+        // The scoped listeners live outside _cache.listeners.
+        releaseScopedSubjectSubs();
+        releaseScopedVideoSubs();
         console.log('[Store] All listeners detached.');
     },
 
