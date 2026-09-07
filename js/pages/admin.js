@@ -624,13 +624,18 @@ const AdminPage = {
                     return;
                 }
                 
-                // These read the users and/or videos collections, which are no
-                // longer loaded at login. Settings needs neither.
-                if (tabId === 'users' || tabId === 'videos' || tabId === 'reports') {
-                    AdminPage.withAdminData(() => {
-                        AdminPage.refresh();
-                        if (tabId === 'reports') AdminPage.renderReports();
-                    }, tabId);
+                // Users and Videos read collections that are no longer loaded at
+                // login, so they pull them on first open.
+                //
+                // Reports is deliberately NOT in this list. It is the default
+                // view and the sidebar clicks its tab on every login, so loading
+                // here would put both collections straight back on the landing
+                // page. It shows only the "Load report data" prompt until that
+                // button is pressed, and loadReportData() pulls what it needs.
+                if (tabId === 'users' || tabId === 'videos') {
+                    AdminPage.withAdminData(() => AdminPage.refresh(), tabId);
+                } else if (tabId === 'reports') {
+                    AdminPage.renderReports();
                 }
             });
         });
@@ -1075,6 +1080,9 @@ const AdminPage = {
             btn.innerHTML = '<i class="fas fa-spinner fa-spin mr-2"></i>Loading...';
         }
         try {
+            // The report reads users and videos too, and neither is loaded at
+            // login any more.
+            await store.ensureAdminData();
             await store.fetchAllProgress();
             this.renderReports();
         } catch (err) {

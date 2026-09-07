@@ -242,11 +242,14 @@ async function readCounts() {
 }
 
 async function writeCountsFromLoadedData() {
+    // No subjects entry: that collection is always in memory (108 documents on
+    // a listener every role already has) so the card reads it live. Writing it
+    // here also produced a wrong number, because the counts are written as soon
+    // as users and videos land, which can precede the subjects snapshot.
     const counts = {
         students: _cache.users.filter(u => u.role === 'student').length,
         teachers: _cache.users.filter(u => u.role === 'teacher').length,
         videos: _cache.videos.length,
-        subjects: _cache.subjects.length,
         updatedAt: new Date().toISOString()
     };
     _cache.counts = counts;
