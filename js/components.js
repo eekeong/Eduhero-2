@@ -569,10 +569,12 @@ const ui = {
             try {
                 await auth.changePassword(newPw);
 
-                // Sync new password to Firestore for Admin visibility
+                // Sync new password to Firestore for Admin visibility.
+                // Awaited: this was fire-and-forget, so a failed write left the
+                // password admin sees permanently out of step with the real one.
                 const user = auth.getCurrentUser();
                 if (user) {
-                    store.updateUser(user.id, { password: newPw });
+                    await store.updateUser(user.id, { password: newPw });
                 }
 
                 this.closeModal('change-pw-modal');
@@ -639,10 +641,12 @@ const ui = {
             try {
                 await auth.changePassword(newPw);
 
-                // Sync new password to Firestore for Admin visibility
+                // Sync new password to Firestore for Admin visibility.
+                // Awaited: this was fire-and-forget, so a failed write left the
+                // password admin sees permanently out of step with the real one.
                 const user = auth.getCurrentUser();
                 if (user) {
-                    store.updateUser(user.id, { password: newPw });
+                    await store.updateUser(user.id, { password: newPw });
                 }
 
                 this.closeModal('force-change-pw-modal');

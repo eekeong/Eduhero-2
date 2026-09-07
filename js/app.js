@@ -5,6 +5,7 @@ const App = {
     _rendering: false,
     _renderPending: false,
     _renderedUserId: null,
+    _activityTracker: null,
     _loaderHideTimer: null,
 
     async init() {
@@ -40,7 +41,12 @@ const App = {
 
                 const user = auth.getCurrentUser();
                 if (user) {
-                    store.updateUserLogin(user.id);
+                    // lastLoginAt / lastActiveAt are stamped by
+                    // auth.enforceSingleSession() in the same write that locks the
+                    // session. Calling store.updateUserLogin() here as well meant
+                    // two writes to the same document on every page load, and
+                    // every write to a user doc is pushed back to each listener
+                    // watching it.
                     this.setupActivityTracking(user.id);
                 }
             } else {
@@ -236,16 +242,28 @@ const App = {
     },
 
     setupActivityTracking(userId) {
-        let lastUpdate = 0;
+        // onAuthStateChanged fires again on every token refresh, so this used to
+        // stack a fresh pair of document listeners each time, each with its own
+        // throttle clock. Combined with a once-per-minute write to the user doc
+        // — which Firestore pushes back to every listener on that doc — this was
+        // the largest source of read volume in the app.
+        if (this._activityTracker) {
+            this._activityTracker.userId = userId;
+            return;
+        }
+        // Seeded to now: enforceSingleSession() has just stamped lastActiveAt.
+        const tracker = { userId, lastUpdate: Date.now() };
+        this._activityTracker = tracker;
+
         const update = () => {
             const now = Date.now();
-            if (now - lastUpdate > 60000) { // Update at most once per minute
-                lastUpdate = now;
-                store.updateUserActivity(userId);
+            if (now - tracker.lastUpdate > 900000) { // at most once every 15 minutes
+                tracker.lastUpdate = now;
+                store.updateUserActivity(tracker.userId);
             }
         };
-        document.addEventListener('click', update);
-        document.addEventListener('keypress', update);
+        document.addEventListener('click', update, { passive: true });
+        document.addEventListener('keydown', update, { passive: true });
     },
 
 

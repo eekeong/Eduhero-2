@@ -1330,35 +1330,38 @@ const AdminPage = {
         `;
         ui.showModal('edit-level-modal', modalHtml);
 
-        document.getElementById('edit-level-form').addEventListener('submit', (e) => {
+        document.getElementById('edit-level-form').addEventListener('submit', async (e) => {
             e.preventDefault();
             const newName = document.getElementById('el-name').value.trim();
-            if (newName && newName !== oldLevelName) {
-                const subjects = store.getSubjects();
-                let updated = 0;
-                subjects.forEach(s => {
-                    if (s.level === oldLevelName) {
-                        store.updateSubject(s.id, { level: newName });
-                        updated++;
-                    }
-                });
+            if (!newName || newName === oldLevelName) {
                 ui.closeModal('edit-level-modal');
-                ui.showToast(`Level name updated for ${updated} subjects`);
-                AdminPage.refresh();
-            } else {
-                ui.closeModal('edit-level-modal');
+                return;
             }
+            const targets = store.getSubjects().filter(s => s.level === oldLevelName);
+            ui.closeModal('edit-level-modal');
+            try {
+                await Promise.all(targets.map(s => store.updateSubject(s.id, { level: newName })));
+                ui.showToast(`Level name updated for ${targets.length} subjects`);
+            } catch (err) {
+                ui.showToast(err.message || 'Some subjects were not renamed — please retry', 'error');
+            }
+            AdminPage.refresh();
         });
     },
 
-    deleteLevel(levelName) {
-        if (confirm(`Are you sure you want to delete the level "${levelName}"? This will permanently delete ALL subjects under this level and their videos.`)) {
-            const subjects = store.getSubjects().filter(s => s.level === levelName);
-            subjects.forEach(s => store.deleteSubject(s.id));
-            ui.closeModal('edit-level-modal');
+    async deleteLevel(levelName) {
+        if (!confirm(`Are you sure you want to delete the level "${levelName}"? This will permanently delete ALL subjects under this level and their videos.`)) return;
+        const subjects = store.getSubjects().filter(s => s.level === levelName);
+        ui.closeModal('edit-level-modal');
+        try {
+            // Sequential: each delete fans out into video and comment writes, and
+            // firing a whole level at once overruns Firestore's write limits.
+            for (const s of subjects) await store.deleteSubject(s.id);
             ui.showToast(`Deleted level and its ${subjects.length} subjects`);
-            AdminPage.refresh();
+        } catch (err) {
+            ui.showToast(err.message || 'Delete did not fully complete — please retry', 'error');
         }
+        AdminPage.refresh();
     },
 
     async syncPresetSubjects() {
@@ -2015,11 +2018,14 @@ const AdminPage = {
         document.getElementById('tab-log').scrollIntoView({ behavior: 'smooth' });
     },
 
-    clearLog() {
-        if (confirm('Clear all activity logs?')) {
-            store.clearLog();
-            this.renderActivityLog();
+    async clearLog() {
+        if (!confirm('Clear all activity logs?')) return;
+        this.renderActivityLog();
+        try {
+            await store.clearLog();
             ui.showToast('Activity log cleared');
+        } catch (err) {
+            ui.showToast(err.message || 'Could not clear the whole log — please retry', 'error');
         }
     },
 
@@ -3196,16 +3202,21 @@ ${user.name} 本月表现非常积极，已经跟上所有进度，请继续保�
         `;
         ui.showModal('add-subject-modal', modalHtml);
 
-        document.getElementById('add-subject-form').addEventListener('submit', (e) => {
+        document.getElementById('add-subject-form').addEventListener('submit', async (e) => {
             e.preventDefault();
-            store.addSubject({
+            const created = store.addSubject({
                 name: document.getElementById('as-name').value,
                 level: document.getElementById('as-level').value,
                 category: document.getElementById('as-category').value,
                 color: document.getElementById('as-color').value
             });
             ui.closeModal('add-subject-modal');
-            ui.showToast('Subject created successfully');
+            try {
+                await created.saved;
+                ui.showToast('Subject created successfully');
+            } catch (err) {
+                ui.showToast(err.message || 'Could not save the subject — please retry', 'error');
+            }
             AdminPage.refresh();
         });
     },
@@ -3248,26 +3259,34 @@ ${user.name} 本月表现非常积极，已经跟上所有进度，请继续保�
         `;
         ui.showModal('edit-subject-modal', modalHtml);
 
-        document.getElementById('edit-subject-form').addEventListener('submit', (e) => {
+        document.getElementById('edit-subject-form').addEventListener('submit', async (e) => {
             e.preventDefault();
-            store.updateSubject(subjectId, {
+            const saving = store.updateSubject(subjectId, {
                 name: document.getElementById('es-name').value,
                 level: document.getElementById('es-level').value,
                 category: document.getElementById('es-category').value,
                 color: document.getElementById('es-color').value
             });
             ui.closeModal('edit-subject-modal');
-            ui.showToast('Subject updated successfully');
+            try {
+                await saving;
+                ui.showToast('Subject updated successfully');
+            } catch (err) {
+                ui.showToast(err.message || 'Could not save the subject — please retry', 'error');
+            }
             AdminPage.refresh();
         });
     },
 
-    deleteSubject(subjectId) {
-        if (confirm('Delete this subject? This will remove all associated videos and unassign it from all users.')) {
-            store.deleteSubject(subjectId);
+    async deleteSubject(subjectId) {
+        if (!confirm('Delete this subject? This will remove all associated videos and unassign it from all users.')) return;
+        try {
+            await store.deleteSubject(subjectId);
             ui.showToast('Subject deleted');
-            AdminPage.refresh();
+        } catch (err) {
+            ui.showToast(err.message || 'Delete did not fully complete — please retry', 'error');
         }
+        AdminPage.refresh();
     },
 
     renderReports() {

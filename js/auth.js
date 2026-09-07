@@ -2,7 +2,9 @@
 const auth = {
 
     isMigrating: false,
-    sessionUnsubscribe: null,
+    sessionEnforced: false,
+    sessionStamping: false,
+    localSid: null,
 
     // Convert student code or email → Firebase Auth email format
     _toAuthEmail(val) {
@@ -23,7 +25,11 @@ const auth = {
             // Re-sync password to Firestore for Admin visibility
             let userInStore = await store.fetchUserByUid(cred.user.uid);
             if (userInStore) {
-                store.updateUser(userInStore.id, { password: password });
+                // Best-effort mirror for the admin's plaintext view. Deliberately
+                // not awaited — it must never block or fail a login — but the
+                // rejection is caught so it cannot surface as an unhandled one.
+                store.updateUser(userInStore.id, { password: password })
+                    .catch(err => console.warn('[Auth] Could not mirror password to Firestore:', err));
             }
             
             console.log('[Auth] 🔍 Checking Firestore for user roles...');
@@ -126,10 +132,9 @@ const auth = {
 
     logout() {
         console.warn('[Auth] 🚪 logout() called.');
-        if (this.sessionUnsubscribe) {
-            this.sessionUnsubscribe();
-            this.sessionUnsubscribe = null;
-        }
+        this.sessionEnforced = false;
+        this.sessionStamping = false;
+        this.localSid = null;
         localStorage.removeItem('eh_session_id');
         store.stopSync();
         return firebase.auth().signOut().then(() => {
@@ -169,7 +174,9 @@ const auth = {
         try {
             await fbUser.updatePassword(newPassword);
             const user = this.getCurrentUser();
-            if (user) store.updateUser(user.id, { mustChangePassword: false });
+            // Awaited: if this write is lost the student is forced through the
+            // change-password screen again on every subsequent login.
+            if (user) await store.updateUser(user.id, { mustChangePassword: false });
         } catch (err) {
             if (err.code === 'auth/requires-recent-login') {
                 throw new Error('Please log out and log back in to change your password.');
@@ -193,52 +200,70 @@ const auth = {
     },
 
     // --- Single Session Enforcement ---
+    //
+    // The session id lives in localStorage, NOT sessionStorage. sessionStorage is
+    // scoped to one tab, so a student who opened the dashboard in a second tab
+    // minted a second id, wrote it to their own user doc, and the first tab's
+    // listener then logged them out of their own account. localStorage is shared
+    // by every tab in the browser, which is what "one device" actually means.
     async enforceSingleSession(uid) {
         if (!uid) return;
-        if (this.sessionUnsubscribe) return; // Already listening
+        if (this.sessionEnforced || this.sessionStamping) return;
+        this.sessionStamping = true;
 
-        // 1. Generate or retrieve local session ID
-        // We use a combination of timestamp and random to ensure uniqueness even on same machine/different tabs
-        let localSid = sessionStorage.getItem('eh_session_id');
-        if (!localSid) {
-            localSid = 'sid_' + Date.now() + '_' + Math.random().toString(36).substr(2, 5);
-            sessionStorage.setItem('eh_session_id', localSid);
-        }
-
-        // 2. Update Firestore with this session ID
-        // Note: We MUST use the internal userId (e.g. u_1) not the Firebase UID
-        let user = store.getUserByFirebaseUid(uid);
-        
-        // If not in cache, try fetching directly (e.g. during first login)
-        if (!user) {
-            user = await store.fetchUserByUid(uid);
-        }
-
-        if (!user) {
-            console.warn('[Auth] ⏳ User doc not ready for session enforcement, will retry...');
-            return;
-        }
-
-        await firebase.firestore().collection('users').doc(user.id).update({
-            lastSessionId: localSid,
-            lastLoginAt: Date.now()
-        });
-
-        console.log('[Auth] 🔒 Session locked:', localSid);
-
-        // 3. Listen for changes
-        this.sessionUnsubscribe = firebase.firestore().collection('users').doc(user.id).onSnapshot(doc => {
-            if (!doc.exists) return;
-            const data = doc.data();
-            const serverSid = data.lastSessionId;
-
-            if (serverSid && serverSid !== localSid) {
-                console.error('[Auth] 💥 Session invalid! Newer login detected elsewhere.');
-                alert('Your account has been logged in on another device. You will be logged out.');
-                this.logout();
+        try {
+            let localSid = localStorage.getItem('eh_session_id');
+            if (!localSid) {
+                localSid = 'sid_' + Date.now() + '_' + Math.random().toString(36).substr(2, 5);
+                localStorage.setItem('eh_session_id', localSid);
             }
-        }, err => {
-            console.error('[Auth] Session listener error:', err);
-        });
+            this.localSid = localSid;
+
+            // Note: we MUST use the internal userId (e.g. u_1), not the Firebase UID.
+            let user = store.getUserByFirebaseUid(uid);
+            if (!user) user = await store.fetchUserByUid(uid);
+
+            if (!user) {
+                console.warn('[Auth] ⏳ User doc not ready for session enforcement, will retry...');
+                return;
+            }
+
+            // One write per page load. lastLoginAt / lastActiveAt used to be
+            // stamped a second time by store.updateUserLogin() right after this;
+            // every write to a user doc is pushed back to every listener on it,
+            // so the duplicate was billed as real reads on every single login.
+            const now = new Date().toISOString();
+            await firebase.firestore().collection('users').doc(user.id).update({
+                lastSessionId: localSid,
+                lastLoginAt: now,
+                lastActiveAt: now
+            });
+
+            // Only arm the check once the write is acknowledged. Arming earlier
+            // would let a snapshot still carrying the PREVIOUS session id — one
+            // emitted before this write — read as a login from another device and
+            // log the user straight back out. Staying disarmed on failure (e.g.
+            // offline) is the safe direction: no enforcement beats a false one.
+            this.sessionEnforced = true;
+            console.log('[Auth] 🔒 Session locked:', localSid);
+        } catch (err) {
+            console.error('[Auth] Could not stamp session:', err);
+        } finally {
+            this.sessionStamping = false;
+        }
+    },
+
+    // Called by the store's user-doc listeners whenever this user's document
+    // changes. There used to be a second onSnapshot on that same document doing
+    // only this check, which doubled the reads billed for every write to it.
+    checkSession(userData) {
+        if (!this.sessionEnforced || !this.localSid || !userData) return;
+        const serverSid = userData.lastSessionId;
+        if (serverSid && serverSid !== this.localSid) {
+            console.error('[Auth] 💥 Session invalid! Newer login detected elsewhere.');
+            this.sessionEnforced = false; // stop re-firing while we tear down
+            alert('Your account has been logged in on another device. You will be logged out.');
+            this.logout();
+        }
     }
 };

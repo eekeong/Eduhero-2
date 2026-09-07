@@ -309,6 +309,11 @@ async function attachRoleListeners(user) {
                     if (idx === -1) _cache.users.push(userData);
                     else _cache.users[idx] = userData;
 
+                    // Single-session check. auth used to run its own onSnapshot on
+                    // this exact document to do this, so every write to it was
+                    // billed twice.
+                    if (typeof auth !== 'undefined') auth.checkSession(userData);
+
                     if (hasSignificantChange) {
                         // The video listeners are scoped to this user's subjects,
                         // so a change in that assignment has to re-scope them.
@@ -336,7 +341,16 @@ async function attachRoleListeners(user) {
             db.collection(COLLECTIONS.USERS),
             snap => {
                 _cache.users = snap.docs.map(docToObj);
-                
+
+                // Single-session check — the admin's own doc arrives in this snapshot.
+                if (typeof auth !== 'undefined') {
+                    const fbUser = firebase.auth().currentUser;
+                    if (fbUser) {
+                        const me = _cache.users.find(u => u.uid === fbUser.uid);
+                        if (me) auth.checkSession(me);
+                    }
+                }
+
                 // Prevent local cache from instantly bypassing skeleton loader if it only has the admin user
                 if (!snap.metadata.fromCache || snap.docs.length > 1) {
                     _cache.initialUsersLoaded = true;
@@ -549,11 +563,19 @@ const store = {
 
     clearLog() {
         _cache.activityLog = [];
-        db.collection(COLLECTIONS.LOG).get().then(snap => {
-            const batch = db.batch();
-            snap.docs.forEach(doc => batch.delete(doc.ref));
-            return batch.commit();
-        });
+        // A batch is capped at 500 writes, so the log has to be cleared in chunks.
+        // The old version built one batch over the whole collection and never
+        // awaited it, so on a log of any size it failed in silence.
+        return (async () => {
+            while (true) {
+                const snap = await db.collection(COLLECTIONS.LOG).limit(400).get();
+                if (snap.empty) return;
+                const batch = db.batch();
+                snap.docs.forEach(doc => batch.delete(doc.ref));
+                await batch.commit();
+                if (snap.size < 400) return;
+            }
+        })();
     },
 
     // ----------------------------------------------------------
@@ -575,7 +597,7 @@ const store = {
         const cleanEmail = (email || '').toLowerCase().trim();
         
         // Always check cache first
-        const cached = _cache.users.find(u => u.email.toLowerCase() === cleanEmail);
+        const cached = _cache.users.find(u => (u.email || '').toLowerCase() === cleanEmail);
         if (cached && (!password || cached.password === password)) {
             return cached;
         }
@@ -711,12 +733,16 @@ const store = {
         return newUser;
     },
 
+    // Returns a promise. It used to return undefined AND skip the database write
+    // entirely when the user was not in the local cache, so callers that did
+    // Promise.resolve(store.updateUser(...)).then(showSuccessToast) reported
+    // success for a write that never happened.
     updateUser(id, updates) {
         const idx = _cache.users.findIndex(u => u.id === id);
         if (idx !== -1) {
             _cache.users[idx] = { ..._cache.users[idx], ...updates };
-            db.collection(COLLECTIONS.USERS).doc(id).update(updates);
         }
+        return db.collection(COLLECTIONS.USERS).doc(id).update(updates);
     },
 
     async deleteUser(id) {
@@ -757,39 +783,50 @@ const store = {
         const id = generateId('s');
         const newSubject = { id, color: '#4F46E5', ...subject };
         _cache.subjects.push(newSubject);
-        db.collection(COLLECTIONS.SUBJECTS).doc(id).set(newSubject);
-        return newSubject;
+        // The caller gets the fields synchronously (the UI renders optimistically)
+        // plus the write on .saved, so a failure can be reported instead of
+        // leaving a subject that exists only in this browser. The promise is kept
+        // off the cached object so it is never handed to Firestore or the UI.
+        return { ...newSubject, saved: db.collection(COLLECTIONS.SUBJECTS).doc(id).set(newSubject) };
     },
 
     updateSubject(id, updates) {
         const idx = _cache.subjects.findIndex(s => s.id === id);
-        if (idx !== -1) {
-            _cache.subjects[idx] = { ..._cache.subjects[idx], ...updates };
-            db.collection(COLLECTIONS.SUBJECTS).doc(id).update(updates);
-        }
+        if (idx !== -1) _cache.subjects[idx] = { ..._cache.subjects[idx], ...updates };
+        return db.collection(COLLECTIONS.SUBJECTS).doc(id).update(updates);
     },
 
-    deleteSubject(id) {
+    // Deleting a subject fans out into user, video and comment writes. None of
+    // them used to be awaited, so a partial failure left orphaned videos behind
+    // while the UI reported a clean delete.
+    async deleteSubject(id) {
         _cache.subjects = _cache.subjects.filter(s => s.id !== id);
+        const writes = [];
+
         _cache.users.forEach(u => {
             if (u.subjects && u.subjects.includes(id)) {
-                const updated = u.subjects.filter(sid => sid !== id);
-                this.updateUser(u.id, { subjects: updated });
+                writes.push(this.updateUser(u.id, { subjects: u.subjects.filter(sid => sid !== id) }));
             }
         });
+
         const vidsToDelete = _cache.videos.filter(v => v.subjectId === id);
         _cache.videos = _cache.videos.filter(v => v.subjectId !== id);
         vidsToDelete.forEach(v => {
-            db.collection(COLLECTIONS.VIDEOS).doc(v.id).delete();
+            writes.push(db.collection(COLLECTIONS.VIDEOS).doc(v.id).delete());
             _cache.comments = _cache.comments.filter(c => c.videoId !== v.id);
-            db.collection(COLLECTIONS.COMMENTS).where('videoId', '==', v.id).get()
-                .then(snap => {
-                    const b = db.batch();
-                    snap.docs.forEach(d => b.delete(d.ref));
-                    return b.commit();
-                });
+            writes.push(
+                db.collection(COLLECTIONS.COMMENTS).where('videoId', '==', v.id).get()
+                    .then(snap => {
+                        if (snap.empty) return;
+                        const b = db.batch();
+                        snap.docs.forEach(d => b.delete(d.ref));
+                        return b.commit();
+                    })
+            );
         });
-        db.collection(COLLECTIONS.SUBJECTS).doc(id).delete();
+
+        writes.push(db.collection(COLLECTIONS.SUBJECTS).doc(id).delete());
+        await Promise.all(writes);
     },
 
     // ----------------------------------------------------------
@@ -936,17 +973,28 @@ const store = {
     // Enhanced Replay Tracking
     async trackVideoProgress(studentId, videoId, event, data = {}) {
         if (!studentId || !videoId) return;
-        
+
         const id = `${studentId}_${videoId}`;
         const now = new Date().toISOString();
         let prog = _cache.progress.find(p => p.id === id);
-        
-        // If not in cache, create initial structure
+
         if (!prog) {
+            // Cache miss. Read the record once instead of assuming it does not
+            // exist. The old code assumed zeros here and then wrote the whole
+            // rebuilt record back, so opening a video before the progress
+            // listener had settled reset that video's real progress to 0%.
+            try {
+                const snap = await db.collection(COLLECTIONS.PROGRESS).doc(id).get();
+                if (snap.exists) prog = docToObj(snap);
+            } catch (err) {
+                console.warn('[Store] Could not read existing progress for', id, err);
+            }
+        }
+
+        const isNew = !prog;
+        if (isNew) {
             prog = {
-                id,
-                studentId,
-                videoId,
+                id, studentId, videoId,
                 watchDuration: 0,
                 watchPercentage: 0,
                 rewatchCount: 0,
@@ -956,86 +1004,107 @@ const store = {
                 completedAt: null,
                 startedAt: null
             };
-            _cache.progress.push(prog);
         }
+        const seededIdx = _cache.progress.findIndex(p => p.id === id);
+        if (seededIdx === -1) _cache.progress.push(prog);
+        else _cache.progress[seededIdx] = prog;
 
+        // 'updates' is what changes in the local cache; 'payload' is what goes to
+        // Firestore. They differ for the accumulating fields, which are applied
+        // server-side so two tabs cannot each add to their own stale copy.
         const updates = { lastWatchedAt: now };
+        const payload = { lastWatchedAt: now };
+        let addedDuration = 0;
+        let addedMilestone = null;
 
         switch (event) {
             case 'opened':
-                if (!prog.openedAt) updates.openedAt = now;
+                if (!prog.openedAt) { updates.openedAt = now; payload.openedAt = now; }
                 break;
             case 'started':
-                if (!prog.startedAt) updates.startedAt = now;
-                // If previously completed, increment rewatch
+                if (!prog.startedAt) { updates.startedAt = now; payload.startedAt = now; }
+                // If previously completed, count this as a rewatch.
                 if (prog.completedAt || (prog.watchPercentage && prog.watchPercentage >= 90)) {
                     updates.rewatchCount = (prog.rewatchCount || 0) + 1;
+                    payload.rewatchCount = firebase.firestore.FieldValue.increment(1);
                 }
                 break;
-            case 'milestone':
+            case 'milestone': {
                 const percent = data.percentage || 0;
-                if (percent > prog.watchPercentage) {
+                if (percent > (prog.watchPercentage || 0)) {
                     updates.watchPercentage = percent;
-                    // Add milestone if not already reached
-                    const milestoneStr = percent.toString();
-                    if (!(prog.milestones || []).includes(milestoneStr)) {
-                        updates.milestones = [...(prog.milestones || []), milestoneStr];
-                    }
+                    payload.watchPercentage = percent;
+                    if (!(prog.milestones || []).includes(String(percent))) addedMilestone = String(percent);
                 }
-                if (data.duration) {
-                    updates.watchDuration = (prog.watchDuration || 0) + data.duration;
-                }
+                if (data.duration) addedDuration = data.duration;
                 break;
+            }
             case 'completed':
-                if (!prog.completedAt) updates.completedAt = now;
+                if (!prog.completedAt) { updates.completedAt = now; payload.completedAt = now; }
                 updates.watchPercentage = 100;
-                if (!(prog.milestones || []).includes('100')) {
-                    updates.milestones = [...(prog.milestones || []), '100'];
+                payload.watchPercentage = 100;
+                if (!(prog.milestones || []).includes('100')) addedMilestone = '100';
+                break;
+            case 'closed': {
+                if (data.duration) addedDuration = data.duration;
+                const pct = data.percentage || 0;
+                if (pct > (prog.watchPercentage || 0)) {
+                    updates.watchPercentage = pct;
+                    payload.watchPercentage = pct;
+                    if (!(prog.milestones || []).includes(String(pct))) addedMilestone = String(pct);
                 }
                 break;
-            case 'closed':
-                if (data.duration) {
-                    updates.watchDuration = (prog.watchDuration || 0) + data.duration;
-                }
-                if (data.percentage && data.percentage > (prog.watchPercentage || 0)) {
-                    updates.watchPercentage = data.percentage;
-                    const milestoneStr = data.percentage.toString();
-                    if (!(prog.milestones || []).includes(milestoneStr)) {
-                        updates.milestones = [...(prog.milestones || []), milestoneStr];
-                    }
-                }
-                break;
+            }
         }
 
-        // Apply to local cache
-        const idx = _cache.progress.findIndex(p => p.id === id);
-        const finalData = { ..._cache.progress[idx], ...updates };
-        _cache.progress[idx] = finalData;
+        if (addedDuration) {
+            updates.watchDuration = (prog.watchDuration || 0) + addedDuration;
+            payload.watchDuration = firebase.firestore.FieldValue.increment(addedDuration);
+        }
+        if (addedMilestone) {
+            updates.milestones = [...(prog.milestones || []), addedMilestone];
+            payload.milestones = firebase.firestore.FieldValue.arrayUnion(addedMilestone);
+        }
 
-        // Save to Firestore
-        return db.collection(COLLECTIONS.PROGRESS).doc(id).set(finalData, { merge: true });
+        // A brand-new record needs its identifying and baseline fields. An
+        // existing one must never have them rewritten from a stale cache.
+        if (isNew) {
+            payload.id = id;
+            payload.studentId = studentId;
+            payload.videoId = videoId;
+            payload.openedAt = prog.openedAt;
+            if (payload.rewatchCount === undefined) payload.rewatchCount = 0;
+            if (payload.watchDuration === undefined) payload.watchDuration = 0;
+            if (payload.watchPercentage === undefined) payload.watchPercentage = 0;
+        }
+
+        const idx = _cache.progress.findIndex(p => p.id === id);
+        _cache.progress[idx] = { ..._cache.progress[idx], ...updates };
+
+        // Swallowed, not rethrown: all six call sites in student.js fire this
+        // without awaiting, so rethrowing would only surface as an unhandled
+        // rejection. Losing a progress write must never interrupt playback.
+        return db.collection(COLLECTIONS.PROGRESS).doc(id).set(payload, { merge: true })
+            .catch(err => console.error('[Store] Failed to save progress for', id, err));
     },
 
     updateUserActivity(userId) {
-        const now = new Date().toISOString();
-        const updates = { lastActiveAt: now };
-        
+        const updates = { lastActiveAt: new Date().toISOString() };
         const idx = _cache.users.findIndex(u => u.id === userId);
-        if (idx !== -1) {
-            _cache.users[idx] = { ..._cache.users[idx], ...updates };
-            db.collection(COLLECTIONS.USERS).doc(userId).update(updates);
-        }
+        if (idx !== -1) _cache.users[idx] = { ..._cache.users[idx], ...updates };
+        return db.collection(COLLECTIONS.USERS).doc(userId).update(updates)
+            .catch(err => console.warn('[Store] activity stamp failed:', err));
     },
 
+    // NOTE: auth.enforceSingleSession() already stamps lastLoginAt/lastActiveAt
+    // in the same write that locks the session, so nothing calls this on login
+    // any more. Kept for any manual/admin use.
     updateUserLogin(userId) {
         const now = new Date().toISOString();
         const updates = { lastLoginAt: now, lastActiveAt: now };
-        
         const idx = _cache.users.findIndex(u => u.id === userId);
-        if (idx !== -1) {
-            _cache.users[idx] = { ..._cache.users[idx], ...updates };
-            db.collection(COLLECTIONS.USERS).doc(userId).update(updates);
-        }
+        if (idx !== -1) _cache.users[idx] = { ..._cache.users[idx], ...updates };
+        return db.collection(COLLECTIONS.USERS).doc(userId).update(updates);
     },
 
     getProgress(studentId, videoId) {
