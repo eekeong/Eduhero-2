@@ -33,7 +33,8 @@ const _cache = {
     bunnySecrets: null,
     ready:       false,
     listeners:   [],  // array of unsubscribe functions
-    initialUsersLoaded: false
+    initialUsersLoaded: false,
+    progressLoaded: false
 };
 
 // ── Helpers ──────────────────────────────────────────────────
@@ -198,6 +199,46 @@ function subscribeScopedVideos(user) {
     ));
 }
 
+// Admin data is READ ONCE, not subscribed to.
+//
+// A collection listener is billed for its initial load and then again for every
+// document change pushed to it for as long as it stays open. The admin was
+// listening to all of users (5031), videos (3221) and progress (4001), so every
+// student login, every lastActiveAt heartbeat and every progress write anywhere
+// in the system was billed a second time to each open admin tab, all day long.
+//
+// Admin mutations already update the local cache optimistically, so the screen
+// stays correct after the admin's own actions. The Refresh button re-reads when
+// they want to pick up other people's changes.
+async function loadAdminUsers() {
+    try {
+        const snap = await db.collection(COLLECTIONS.USERS).get();
+        _cache.users = snap.docs.map(docToObj);
+        _cache.initialUsersLoaded = true;
+        if (typeof AdminPage !== 'undefined' && document.getElementById('admin-users-list')) {
+            AdminPage.renderUsers();
+            AdminPage.renderSubjects(); // teacher counts in the subjects list
+            AdminPage.renderStats();
+        }
+    } catch (err) {
+        console.error('[Store] Could not load users:', err);
+    }
+}
+
+async function loadAdminVideos() {
+    try {
+        const snap = await db.collection(COLLECTIONS.VIDEOS).get();
+        _cache.videos = snap.docs.map(docToObj);
+        if (typeof AdminPage !== 'undefined' && document.getElementById('admin-videos-list')) {
+            AdminPage.renderVideos();
+            AdminPage.renderSubjects(); // video counts in the subjects list
+            AdminPage.renderStats();
+        }
+    } catch (err) {
+        console.error('[Store] Could not load videos:', err);
+    }
+}
+
 function waitForSnapshot(query, callback, unsubsArray) {
     return new Promise(resolve => {
         let isResolved = false;
@@ -281,10 +322,12 @@ async function attachRoleListeners(user) {
         unsubs
     ));
 
-    // ── CURRENT USER DATA (student/teacher) ──────────────────
-    // Admin already listens to ALL users below.
-    // Students/Teachers need to listen to their own doc for subject/month updates.
-    if (user.role !== 'admin') {
+    // ── CURRENT USER DATA (all roles) ────────────────────────
+    // Exactly one document. Students and teachers need it for subject/month
+    // changes; every role needs it for the single-session check. Admin used to
+    // get this from the all-users listener — 5031 documents watched to read one
+    // field on one of them.
+    {
         promises.push(waitForSnapshot(
             db.collection(COLLECTIONS.USERS).doc(user.id),
             doc => {
@@ -314,7 +357,9 @@ async function attachRoleListeners(user) {
                     // billed twice.
                     if (typeof auth !== 'undefined') auth.checkSession(userData);
 
-                    if (hasSignificantChange) {
+                    if (hasSignificantChange && user.role !== 'admin') {
+                        // Admin has no scoped video listener — it reads the whole
+                        // collection once instead.
                         // The video listeners are scoped to this user's subjects,
                         // so a change in that assignment has to re-scope them.
                         // No-op when the subject list is actually unchanged.
@@ -334,65 +379,15 @@ async function attachRoleListeners(user) {
         ));
     }
 
-    // ── ADMIN-only listeners ──────────────────────────────────
+    // ── ADMIN-only data: one-time reads, see loadAdminUsers() above ──
     if (user.role === 'admin') {
-        // Full users list (needed for user management)
-        promises.push(waitForSnapshot(
-            db.collection(COLLECTIONS.USERS),
-            snap => {
-                _cache.users = snap.docs.map(docToObj);
-
-                // Single-session check — the admin's own doc arrives in this snapshot.
-                if (typeof auth !== 'undefined') {
-                    const fbUser = firebase.auth().currentUser;
-                    if (fbUser) {
-                        const me = _cache.users.find(u => u.uid === fbUser.uid);
-                        if (me) auth.checkSession(me);
-                    }
-                }
-
-                // Prevent local cache from instantly bypassing skeleton loader if it only has the admin user
-                if (!snap.metadata.fromCache || snap.docs.length > 1) {
-                    _cache.initialUsersLoaded = true;
-                }
-                
-                // Reactive UI update for Admin
-                if (typeof AdminPage !== 'undefined' && document.getElementById('admin-users-list')) {
-                    AdminPage.renderUsers();
-                    AdminPage.renderSubjects(); // Update teacher counts in subjects list
-                    AdminPage.renderStats();
-                }
-            },
-            unsubs
-        ));
-        // All videos (needed for admin monitoring)
-        promises.push(waitForSnapshot(
-            db.collection(COLLECTIONS.VIDEOS),
-            snap => {
-                _cache.videos = snap.docs.map(docToObj);
-                // Reactive UI update for Admin
-                if (typeof AdminPage !== 'undefined' && document.getElementById('admin-videos-list')) {
-                    AdminPage.renderVideos();
-                    AdminPage.renderSubjects(); // CRITICAL: Update video counts in subjects list
-                    AdminPage.renderStats();
-                }
-            },
-            unsubs
-        ));
-        // NOTE: activityLog has NO listener — fetched on-demand only
-        
-        // Progress (Admin needs to see everyone's progress for reports)
-        promises.push(waitForSnapshot(
-            db.collection(COLLECTIONS.PROGRESS),
-            snap => {
-                _cache.progress = snap.docs.map(docToObj);
-                // Refresh reports if visible
-                if (typeof AdminPage !== 'undefined' && document.getElementById('tab-reports') && !document.getElementById('tab-reports').classList.contains('hidden')) {
-                    AdminPage.renderReports();
-                }
-            },
-            unsubs
-        ));
+        promises.push(loadAdminUsers());
+        promises.push(loadAdminVideos());
+        // NOTE: activityLog has NO listener — fetched on-demand only.
+        // NOTE: progress has neither a listener nor an eager read. It is the
+        // largest collection in the system, and the only things that read it are
+        // the Learning Reports tab and the per-student reset, both of which now
+        // fetch it themselves.
 
     // ── TEACHER-only listeners ────────────────────────────────
     } else if (user.role === 'teacher') {
@@ -1122,6 +1117,33 @@ const store = {
 
     getAllProgressForStudent(studentId) {
         return _cache.progress.filter(p => p.studentId === studentId);
+    },
+
+    // The Learning Reports tab calls this the first time it is opened. Nothing
+    // loads the progress collection eagerly any more.
+    async fetchAllProgress() {
+        const snap = await db.collection(COLLECTIONS.PROGRESS).get();
+        _cache.progress = snap.docs.map(docToObj);
+        _cache.progressLoaded = true;
+        return [..._cache.progress];
+    },
+
+    isProgressLoaded() {
+        return !!_cache.progressLoaded;
+    },
+
+    // One student's records, without pulling the whole collection.
+    async fetchProgressForStudent(studentId) {
+        const snap = await db.collection(COLLECTIONS.PROGRESS)
+            .where('studentId', '==', studentId).get();
+        return snap.docs.map(docToObj);
+    },
+
+    // Re-read what the admin screen shows. These are no longer live listeners,
+    // so the Refresh button is how an admin picks up other people's changes.
+    async refreshAdminData() {
+        _cache.progressLoaded = false;
+        await Promise.all([loadAdminUsers(), loadAdminVideos()]);
     },
 
     getProgressRecords() {

@@ -7,6 +7,10 @@ const AdminPage = {
                         <h2 class="text-2xl font-bold text-gray-800" id="admin-page-title">Admin Dashboard</h2>
                         <p class="text-gray-500 text-sm" id="admin-page-subtitle">Manage users and monitor platform activity.</p>
                     </div>
+                    <button id="admin-refresh-btn" onclick="AdminPage.reloadData()" title="Re-read users and videos from the database"
+                        class="shrink-0 inline-flex items-center gap-2 px-4 py-2 text-sm font-medium text-gray-600 bg-white border border-gray-200 rounded-lg shadow-sm hover:bg-gray-50 hover:text-indigo-600 transition disabled:opacity-50">
+                        <i class="fas fa-rotate"></i><span>Refresh</span>
+                    </button>
                 </div>
 
                 <!-- Stats Grid -->
@@ -984,10 +988,37 @@ const AdminPage = {
         document.getElementById('admin-stats').innerHTML = statsHtml;
     },
 
+    // Users and videos are read once at login rather than subscribed to, so
+    // this is how an admin picks up changes made by someone else.
+    async reloadData() {
+        const btn = document.getElementById('admin-refresh-btn');
+        if (btn) {
+            btn.disabled = true;
+            btn.querySelector('i').classList.add('fa-spin');
+        }
+        try {
+            await store.refreshAdminData();
+            this.refresh();
+            // The reports tab holds the only other cached collection.
+            const reports = document.getElementById('tab-reports');
+            if (reports && !reports.classList.contains('hidden')) this.renderReports();
+            ui.showToast('Data refreshed');
+        } catch (err) {
+            ui.showToast(err.message || 'Could not refresh — please retry', 'error');
+        } finally {
+            if (btn) {
+                btn.disabled = false;
+                btn.querySelector('i').classList.remove('fa-spin');
+            }
+        }
+    },
+
     async resetStudentProgress(userId) {
         if (confirm('Are you sure you want to reset ALL viewing progress for this student? This action cannot be undone.')) {
             try {
-                const progressRecords = store.getProgressRecords().filter(p => p.studentId === userId);
+                // Queried directly instead of filtering the cached collection:
+                // progress is no longer loaded on every admin page load.
+                const progressRecords = await store.fetchProgressForStudent(userId);
                 if (progressRecords.length === 0) {
                     ui.showToast('No viewing records found for this student.', 'info');
                     return;
@@ -3292,6 +3323,24 @@ ${user.name} 本月表现非常积极，已经跟上所有进度，请继续保�
     renderReports() {
         const container = document.getElementById('tab-reports');
         if (!container || container.classList.contains('hidden')) return;
+
+        // Progress is the largest collection in the system and this tab is the
+        // only screen that reads all of it, so it is fetched on first open
+        // rather than on every admin page load.
+        if (!store.isProgressLoaded()) {
+            if (!this._progressLoading) {
+                this._progressLoading = true;
+                container.innerHTML = '<div class="text-center py-12 text-gray-400"><i class="fas fa-spinner fa-spin text-2xl"></i><p class="mt-3 text-sm">Loading learning data...</p></div>';
+                store.fetchAllProgress()
+                    .then(() => { this._progressLoading = false; this.renderReports(); })
+                    .catch(err => {
+                        this._progressLoading = false;
+                        container.innerHTML = '<div class="text-center py-12 text-gray-500"><i class="fas fa-triangle-exclamation text-2xl text-amber-500"></i><p class="mt-3 text-sm">Could not load learning data.</p><button onclick="AdminPage.renderReports()" class="mt-3 px-4 py-2 text-sm bg-indigo-600 text-white rounded-lg">Retry</button></div>';
+                        console.error('[Admin] Could not load progress:', err);
+                    });
+            }
+            return;
+        }
 
         const students = store.getUsers().filter(u => u.role === 'student');
         const videos = store.getVideos();
