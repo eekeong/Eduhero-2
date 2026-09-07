@@ -225,24 +225,37 @@ async function loadAdminVideos() {
 
 // Counts for the dashboard cards, without downloading the collections.
 //
-// The compat SDK has no aggregation API at any version — count() lives only in
-// the modular build — so the modular Firestore is pulled in dynamically and
-// pointed at the compat instance's underlying delegate. It is imported ONLY
-// here, which means only an admin ever downloads it; students and teachers
-// never touch this path and their page weight is unchanged.
+// Aggregation queries are not an option here: count() exists only in the
+// modular SDK (never in compat, at any version), the modular build cannot be
+// pointed at the compat instance because gstatic ships them as separate module
+// instances, and the REST aggregation endpoint answers RESOURCE_EXHAUSTED on
+// this project while ordinary reads still succeed.
 //
-// An aggregation is billed one read per 1000 documents matched, so counting
-// 5031 users costs 6 reads instead of 5031.
-let _modularFirestore = null;
-async function modularCount(collectionName, field, op, value) {
-    if (!_modularFirestore) {
-        _modularFirestore = await import('https://www.gstatic.com/firebasejs/10.14.1/firebase-firestore.js');
+// So the counts live in a single document that costs one read. It is rewritten
+// from the real collections every time the admin actually loads them — opening
+// Users, Videos or Reports, or pressing Refresh — so it self-heals on any
+// normal use of the console and needs no bookkeeping on individual writes.
+async function readCounts() {
+    const doc = await db.collection(COLLECTIONS.SETTINGS).doc('counts').get();
+    _cache.counts = doc.exists ? doc.data() : null;
+    return _cache.counts;
+}
+
+async function writeCountsFromLoadedData() {
+    const counts = {
+        students: _cache.users.filter(u => u.role === 'student').length,
+        teachers: _cache.users.filter(u => u.role === 'teacher').length,
+        videos: _cache.videos.length,
+        subjects: _cache.subjects.length,
+        updatedAt: new Date().toISOString()
+    };
+    _cache.counts = counts;
+    try {
+        await db.collection(COLLECTIONS.SETTINGS).doc('counts').set(counts);
+    } catch (err) {
+        console.warn('[Store] Could not cache dashboard counts:', err);
     }
-    const m = _modularFirestore;
-    const base = m.collection(db._delegate, collectionName);
-    const q = field ? m.query(base, m.where(field, op, value)) : base;
-    const snap = await m.getCountFromServer(q);
-    return snap.data().count;
+    return counts;
 }
 
 function waitForSnapshot(query, callback, unsubsArray) {
@@ -1151,21 +1164,21 @@ const store = {
         if (_cache.adminDataLoaded) return;
         await Promise.all([loadAdminUsers(), loadAdminVideos()]);
         _cache.adminDataLoaded = true;
+        // The collections are in memory now, so the cards can be made exact
+        // again for free.
+        await writeCountsFromLoadedData();
+        if (typeof AdminPage !== 'undefined' && document.getElementById('admin-stats')) {
+            AdminPage.renderStats();
+        }
     },
 
     isAdminDataLoaded() {
         return !!_cache.adminDataLoaded;
     },
 
-    // Dashboard cards. Cheap enough to run on every admin page load.
+    // Dashboard cards: one document read per admin page load.
     async fetchCounts() {
-        const [students, teachers, videos] = await Promise.all([
-            modularCount(COLLECTIONS.USERS, 'role', '==', 'student'),
-            modularCount(COLLECTIONS.USERS, 'role', '==', 'teacher'),
-            modularCount(COLLECTIONS.VIDEOS)
-        ]);
-        _cache.counts = { students, teachers, videos, subjects: _cache.subjects.length };
-        return _cache.counts;
+        return readCounts();
     },
 
     getCounts() {
@@ -1177,8 +1190,9 @@ const store = {
     async refreshAdminData() {
         _cache.progressLoaded = false;
         _cache.adminDataLoaded = false;
-        _cache.counts = null;
-        await Promise.all([this.ensureAdminData(), this.fetchCounts()]);
+        // ensureAdminData() rewrites the counts document from the freshly
+        // loaded collections, so there is nothing else to refresh.
+        await this.ensureAdminData();
     },
 
     getProgressRecords() {

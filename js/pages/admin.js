@@ -392,10 +392,17 @@ const AdminPage = {
         this.setupTabs();
         this.bindSettingsForm();
 
-        // Four aggregation queries, billed one read per 1000 documents matched:
-        // roughly nine reads for numbers that used to cost 8252 documents.
+        // One document read for the four cards, instead of the 8252 documents
+        // they used to cost. It is rewritten from the real collections whenever
+        // the admin opens a screen that loads them.
         store.fetchCounts()
-            .then(() => this.renderStats())
+            .then(counts => {
+                this.renderStats();
+                // First run only: the counts document does not exist yet, so load
+                // the collections once to create it. ensureAdminData() writes it,
+                // so this branch cannot repeat.
+                if (!counts) return store.ensureAdminData();
+            })
             .catch(err => console.error('[Admin] Could not load counts:', err));
     },
 
@@ -931,9 +938,10 @@ const AdminPage = {
         const container = document.getElementById('admin-stats');
         if (!container) return;
 
-        // Counts come from aggregation queries, not from the collections
+        // Counts come from a cached counts document, not from the collections
         // themselves — the cards used to be the only reason an admin page load
-        // downloaded 5031 users and 3221 videos.
+        // downloaded 5031 users and 3221 videos. They become exact again as soon
+        // as any screen loads the real data.
         const counts = store.getCounts();
         const subjects = store.getSubjects();
 
