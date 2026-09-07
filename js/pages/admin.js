@@ -78,7 +78,7 @@ const AdminPage = {
                                 <h3 class="text-lg font-semibold text-gray-800">Monitored Videos</h3>
                                 <div class="relative w-full md:w-64">
                                     <i class="fas fa-search absolute left-3 top-2.5 text-gray-400 text-xs"></i>
-                                    <input type="text" id="admin-video-search" placeholder="Search videos..." class="w-full pl-9 pr-3 py-2 border border-gray-200 rounded-lg text-sm focus:outline-none focus:border-indigo-500" onkeyup="AdminPage.videoPage=1; AdminPage.renderVideos()">
+                                    <input type="text" id="admin-video-search" placeholder="Search videos..." class="w-full pl-9 pr-3 py-2 border border-gray-200 rounded-lg text-sm focus:outline-none focus:border-indigo-500" oninput="AdminPage.onVideoSearch()">
                                 </div>
                             </div>
                             <div class="overflow-x-auto rounded-lg border border-gray-200">
@@ -2023,34 +2023,52 @@ const AdminPage = {
         }
     },
 
+    // Debounced so a fast typist triggers one re-render instead of one per keystroke.
+    onVideoSearch() {
+        clearTimeout(this.videoSearchTimeout);
+        this.videoSearchTimeout = setTimeout(() => {
+            this.videoPage = 1;
+            this.renderVideos();
+        }, 250);
+    },
+
     renderVideos() {
         const container = document.getElementById('admin-videos-list');
         if (!container) return;
 
         let videos = store.getVideos();
-        const users = store.getUsers();
-        const subjects = store.getSubjects();
+
+        // Index users and subjects by id once. Looking them up with Array.find()
+        // per video turned this into ~16M comparisons on a 3k-video / 5k-user
+        // database, which froze the page on every keystroke in the search box.
+        const usersById = new Map(store.getUsers().map(u => [u.id, u]));
+        const subjectsById = new Map(store.getSubjects().map(s => [s.id, s]));
+
+        // Count views for every video in one pass over the progress collection.
+        // This used to be called twice per sort comparison — each call rescanning
+        // the entire collection — which was by far the most expensive part.
+        const viewCounts = store.getVideoViewCounts();
 
         // Search Filter
         const searchVal = (document.getElementById('admin-video-search')?.value || '').toLowerCase().trim();
         if (searchVal) {
             videos = videos.filter(v => {
-                const s = subjects.find(s => s.id === v.subjectId);
-                const u = users.find(u => u.id === v.teacherId);
-                return v.title.toLowerCase().includes(searchVal) || 
-                       (s && s.name.toLowerCase().includes(searchVal)) || 
-                       (u && u.name.toLowerCase().includes(searchVal));
+                const s = subjectsById.get(v.subjectId);
+                const u = usersById.get(v.teacherId);
+                return (v.title || '').toLowerCase().includes(searchVal) ||
+                       (s && (s.name || '').toLowerCase().includes(searchVal)) ||
+                       (u && (u.name || '').toLowerCase().includes(searchVal));
             });
         }
 
         // Sort by Views (descending), then by Level
         videos.sort((a, b) => {
-            const viewsA = store.getVideoViews(a.id);
-            const viewsB = store.getVideoViews(b.id);
+            const viewsA = viewCounts.get(a.id) || 0;
+            const viewsB = viewCounts.get(b.id) || 0;
             if (viewsB !== viewsA) return viewsB - viewsA;
-            
-            const sA = subjects.find(s => s.id === a.subjectId);
-            const sB = subjects.find(s => s.id === b.subjectId);
+
+            const sA = subjectsById.get(a.subjectId);
+            const sB = subjectsById.get(b.subjectId);
             const levelA = sA ? (sA.level || '') : '';
             const levelB = sB ? (sB.level || '') : '';
             return levelA.localeCompare(levelB);
@@ -2065,15 +2083,15 @@ const AdminPage = {
         const paginatedVideos = videos.slice(start, start + this.videosPerPage);
 
         const html = paginatedVideos.map(v => {
-            const u = users.find(u => u.id === v.teacherId);
-            const s = subjects.find(s => s.id === v.subjectId);
+            const u = usersById.get(v.teacherId);
+            const s = subjectsById.get(v.subjectId);
             return `
             <tr class="hover:bg-gray-50 transition-colors">
                 <td class="px-4 py-3 font-medium text-gray-900">${v.title}</td>
                 <td class="px-4 py-3">${s ? s.name : '-'}</td>
                 <td class="px-4 py-3">${u ? u.name : '-'}</td>
                 <td class="px-4 py-3 text-xs text-gray-400">${new Date(v.date).toLocaleString([], { dateStyle: 'short', timeStyle: 'short' })}</td>
-                <td class="px-4 py-3 font-semibold text-indigo-600">${store.getVideoViews(v.id)}</td>
+                <td class="px-4 py-3 font-semibold text-indigo-600">${viewCounts.get(v.id) || 0}</td>
                 <td class="px-4 py-3 text-right flex gap-3 justify-end items-center">
                     <button onclick="AdminPage.playVideo('${v.id}')" class="text-indigo-600 hover:text-indigo-900 font-medium whitespace-nowrap"><i class="fas fa-play-circle mr-1"></i> Preview</button>
                     <button onclick="AdminPage.editVideo('${v.id}')" class="text-emerald-600 hover:text-emerald-900 font-medium whitespace-nowrap"><i class="fas fa-edit mr-1"></i> Edit</button>

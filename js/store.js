@@ -742,6 +742,18 @@ const store = {
         return (_cache.progress || []).filter(p => p.videoId === videoId).length;
     },
 
+    // Same counts as getVideoViews(), but for every video in a single pass.
+    // Use this when rendering a list: calling getVideoViews() per row (or worse,
+    // inside a sort comparator) rescans the whole progress collection each time.
+    getVideoViewCounts() {
+        const counts = new Map();
+        (_cache.progress || []).forEach(p => {
+            if (!p.videoId) return;
+            counts.set(p.videoId, (counts.get(p.videoId) || 0) + 1);
+        });
+        return counts;
+    },
+
     addVideo(video) {
         const id = generateId('v');
         const newVideo = {
