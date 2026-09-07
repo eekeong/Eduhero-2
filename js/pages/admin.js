@@ -997,11 +997,16 @@ const AdminPage = {
             btn.querySelector('i').classList.add('fa-spin');
         }
         try {
+            const reportsWereLoaded = store.isProgressLoaded();
             await store.refreshAdminData();
             this.refresh();
-            // The reports tab holds the only other cached collection.
+            // Only re-pull the reports collection if it was already on screen —
+            // otherwise Refresh would quietly cost thousands of reads.
             const reports = document.getElementById('tab-reports');
-            if (reports && !reports.classList.contains('hidden')) this.renderReports();
+            if (reports && !reports.classList.contains('hidden')) {
+                if (reportsWereLoaded) await store.fetchAllProgress();
+                this.renderReports();
+            }
             ui.showToast('Data refreshed');
         } catch (err) {
             ui.showToast(err.message || 'Could not refresh — please retry', 'error');
@@ -1009,6 +1014,25 @@ const AdminPage = {
             if (btn) {
                 btn.disabled = false;
                 btn.querySelector('i').classList.remove('fa-spin');
+            }
+        }
+    },
+
+    // Pulls the progress collection, then re-renders the reports tab.
+    async loadReportData() {
+        const btn = document.getElementById('admin-load-reports');
+        if (btn) {
+            btn.disabled = true;
+            btn.innerHTML = '<i class="fas fa-spinner fa-spin mr-2"></i>Loading...';
+        }
+        try {
+            await store.fetchAllProgress();
+            this.renderReports();
+        } catch (err) {
+            ui.showToast(err.message || 'Could not load report data — please retry', 'error');
+            if (btn) {
+                btn.disabled = false;
+                btn.innerHTML = '<i class="fas fa-download mr-2"></i>Load report data';
             }
         }
     },
@@ -3325,20 +3349,21 @@ ${user.name} 本月表现非常积极，已经跟上所有进度，请继续保�
         if (!container || container.classList.contains('hidden')) return;
 
         // Progress is the largest collection in the system and this tab is the
-        // only screen that reads all of it, so it is fetched on first open
-        // rather than on every admin page load.
+        // only screen that reads all of it. It is NOT fetched automatically:
+        // this tab is the admin landing view, so auto-loading would put those
+        // thousands of reads back on every single page load — which is the whole
+        // point of not subscribing to the collection. Same on-demand pattern as
+        // the teacher dashboard's view counts.
         if (!store.isProgressLoaded()) {
-            if (!this._progressLoading) {
-                this._progressLoading = true;
-                container.innerHTML = '<div class="text-center py-12 text-gray-400"><i class="fas fa-spinner fa-spin text-2xl"></i><p class="mt-3 text-sm">Loading learning data...</p></div>';
-                store.fetchAllProgress()
-                    .then(() => { this._progressLoading = false; this.renderReports(); })
-                    .catch(err => {
-                        this._progressLoading = false;
-                        container.innerHTML = '<div class="text-center py-12 text-gray-500"><i class="fas fa-triangle-exclamation text-2xl text-amber-500"></i><p class="mt-3 text-sm">Could not load learning data.</p><button onclick="AdminPage.renderReports()" class="mt-3 px-4 py-2 text-sm bg-indigo-600 text-white rounded-lg">Retry</button></div>';
-                        console.error('[Admin] Could not load progress:', err);
-                    });
-            }
+            container.innerHTML = `
+                <div class="text-center py-16">
+                    <div class="inline-flex items-center justify-center w-14 h-14 rounded-full bg-indigo-50 text-indigo-600 mb-4"><i class="fas fa-chart-line text-xl"></i></div>
+                    <h3 class="text-lg font-semibold text-gray-800">Learning Reports</h3>
+                    <p class="mt-2 text-sm text-gray-500 max-w-md mx-auto">Report data is loaded on request so it does not count against the daily database quota every time you open the dashboard.</p>
+                    <button id="admin-load-reports" onclick="AdminPage.loadReportData()" class="mt-5 px-5 py-2.5 text-sm font-medium bg-indigo-600 text-white rounded-lg shadow-sm hover:bg-indigo-700 transition">
+                        <i class="fas fa-download mr-2"></i>Load report data
+                    </button>
+                </div>`;
             return;
         }
 
