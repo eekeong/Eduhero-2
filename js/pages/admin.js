@@ -3354,18 +3354,40 @@ ${user.name} 本月表现非常积极，已经跟上所有进度，请继续保�
         // thousands of reads back on every single page load — which is the whole
         // point of not subscribing to the collection. Same on-demand pattern as
         // the teacher dashboard's view counts.
+        // The prompt is added ALONGSIDE the report body, never in place of it.
+        // Replacing container.innerHTML here destroyed #report-unwatched-list,
+        // #report-low-progress-list and #report-video-stats-container — the
+        // elements the rest of this function writes into — so once the data
+        // arrived the report had nowhere left to render and the panel just sat
+        // there.
         if (!store.isProgressLoaded()) {
-            container.innerHTML = `
-                <div class="text-center py-16">
+            if (!document.getElementById('admin-reports-prompt')) {
+                container.insertAdjacentHTML('afterbegin', `
+                <div id="admin-reports-prompt" class="text-center py-16">
                     <div class="inline-flex items-center justify-center w-14 h-14 rounded-full bg-indigo-50 text-indigo-600 mb-4"><i class="fas fa-chart-line text-xl"></i></div>
                     <h3 class="text-lg font-semibold text-gray-800">Learning Reports</h3>
-                    <p class="mt-2 text-sm text-gray-500 max-w-md mx-auto">Report data is loaded on request so it does not count against the daily database quota every time you open the dashboard.</p>
+                    <p class="mt-2 text-sm text-gray-500 max-w-md mx-auto">Report data is loaded on request, so opening the dashboard does not spend the daily database quota on it.</p>
                     <button id="admin-load-reports" onclick="AdminPage.loadReportData()" class="mt-5 px-5 py-2.5 text-sm font-medium bg-indigo-600 text-white rounded-lg shadow-sm hover:bg-indigo-700 transition">
                         <i class="fas fa-download mr-2"></i>Load report data
                     </button>
-                </div>`;
+                </div>`);
+            }
+            // Hide the report body, remembering only what WE hid so nothing that
+            // was already hidden gets revealed on the way back.
+            [...container.children].forEach(el => {
+                if (el.id === 'admin-reports-prompt' || el.classList.contains('hidden')) return;
+                el.classList.add('hidden');
+                el.dataset.reportHidden = '1';
+            });
             return;
         }
+
+        const prompt = document.getElementById('admin-reports-prompt');
+        if (prompt) prompt.remove();
+        container.querySelectorAll('[data-report-hidden]').forEach(el => {
+            el.classList.remove('hidden');
+            delete el.dataset.reportHidden;
+        });
 
         const students = store.getUsers().filter(u => u.role === 'student');
         const videos = store.getVideos();
