@@ -86,7 +86,10 @@ const TeacherPage = {
                                     <div class="min-w-0">
                                         <div class="text-sm font-medium text-slate-800 truncate">${video.title}</div>
                                         <div class="flex items-center gap-3 mt-0.5 text-[9px] font-bold text-slate-400 uppercase tracking-tighter">
-                                            <span><i class="fas fa-eye mr-1"></i>${store.getVideoViews(video.id)} VIEWS</span>
+                                            <!-- Reads the denormalised counter on the video document.
+                                                 store.getVideoViews() counts progress records, which required
+                                                 subscribing to the entire progress collection on every login. -->
+                                            <span><i class="fas fa-eye mr-1"></i>${video.views || 0} VIEWS</span>
                                             <span><i class="fas fa-calendar-alt mr-1"></i>${new Date(video.date).toLocaleDateString()}</span>
                                         </div>
                                     </div>

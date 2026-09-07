@@ -126,6 +126,78 @@ async function seedIfEmpty() {
 //  comments    → NO persistent listener.
 //                Read once per video when a video is opened.
 //
+// ── Subject-scoped video listeners (students & teachers) ─────
+//
+// Both roles only ever display videos for the subjects they are assigned, but
+// both used to subscribe to the entire videos collection — every fresh login
+// read every video document in the database (3000+ on the live project, which
+// is what exhausts the daily Firestore read quota). These listeners are scoped
+// to the user's own subjects and rebuilt if that assignment changes.
+const _scopedVideos = { unsubs: [], chunks: new Map(), scopeKey: null, role: null };
+
+function chunkArray(arr, size) {
+    const out = [];
+    for (let i = 0; i < arr.length; i += size) out.push(arr.slice(i, i + size));
+    return out;
+}
+
+function releaseScopedVideoSubs() {
+    _scopedVideos.unsubs.forEach(unsub => {
+        try { unsub(); } catch (e) {}
+    });
+    _scopedVideos.unsubs = [];
+    _scopedVideos.chunks.clear();
+    _scopedVideos.scopeKey = null;
+    _scopedVideos.role = null;
+}
+
+// Merge the per-chunk results back into one cache array and refresh the page.
+function applyScopedVideos() {
+    const merged = new Map();
+    _scopedVideos.chunks.forEach(list => list.forEach(v => merged.set(v.id, v)));
+    _cache.videos = [...merged.values()];
+
+    if (_scopedVideos.role === 'teacher') {
+        if (typeof TeacherPage !== 'undefined' && document.getElementById('teacher-levels-list')) {
+            TeacherPage.renderSubjects();
+        }
+    } else if (typeof StudentPage !== 'undefined' && document.getElementById('student-dashboard-wrapper')) {
+        StudentPage.renderSubjects();
+    }
+}
+
+// Returns an array of promises that resolve once each chunk's first snapshot
+// has arrived. Safe to call again when the user's subjects change — it is a
+// no-op if the scope is unchanged.
+function subscribeScopedVideos(user) {
+    const subjectIds = [...new Set((user.subjects || []).filter(Boolean))];
+    const scopeKey = subjectIds.slice().sort().join('|');
+
+    if (_scopedVideos.scopeKey === scopeKey && _scopedVideos.unsubs.length) {
+        return []; // already listening to exactly this set of subjects
+    }
+
+    releaseScopedVideoSubs();
+    _scopedVideos.scopeKey = scopeKey;
+    _scopedVideos.role = user.role;
+
+    if (subjectIds.length === 0) {
+        applyScopedVideos(); // no subjects assigned yet — show an empty list
+        return [];
+    }
+
+    // The compat SDK caps an 'in' filter at 10 values, so split the subject
+    // list and merge the results.
+    return chunkArray(subjectIds, 10).map((ids, index) => waitForSnapshot(
+        db.collection(COLLECTIONS.VIDEOS).where('subjectId', 'in', ids),
+        snap => {
+            _scopedVideos.chunks.set(index, snap.docs.map(docToObj));
+            applyScopedVideos();
+        },
+        _scopedVideos.unsubs
+    ));
+}
+
 function waitForSnapshot(query, callback, unsubsArray) {
     return new Promise(resolve => {
         let isResolved = false;
@@ -238,6 +310,11 @@ async function attachRoleListeners(user) {
                     else _cache.users[idx] = userData;
 
                     if (hasSignificantChange) {
+                        // The video listeners are scoped to this user's subjects,
+                        // so a change in that assignment has to re-scope them.
+                        // No-op when the subject list is actually unchanged.
+                        subscribeScopedVideos(userData);
+
                         // Smart UI updates
                         if (user.role === 'teacher' && typeof TeacherPage !== 'undefined' && document.getElementById('teacher-levels-list')) {
                             TeacherPage.renderSubjects();
@@ -305,45 +382,19 @@ async function attachRoleListeners(user) {
 
     // ── TEACHER-only listeners ────────────────────────────────
     } else if (user.role === 'teacher') {
-        // Teachers should see all videos (similar to students) so they can see existing content
-        // in their assigned subjects. They can only edit/delete their own videos via UI logic.
-        promises.push(waitForSnapshot(
-            db.collection(COLLECTIONS.VIDEOS),
-            snap => {
-                _cache.videos = snap.docs.map(docToObj);
-                // Reactive UI update for Teacher dashboard video counts
-                if (typeof TeacherPage !== 'undefined' && document.getElementById('teacher-levels-list')) {
-                    TeacherPage.renderSubjects();
-                }
-            },
-            unsubs
-        ));
-        // Progress (Teacher needs to see progress for view counts)
-        promises.push(waitForSnapshot(
-            db.collection(COLLECTIONS.PROGRESS),
-            snap => {
-                _cache.progress = snap.docs.map(docToObj);
-                if (typeof TeacherPage !== 'undefined' && document.getElementById('teacher-levels-list')) {
-                    TeacherPage.renderSubjects();
-                }
-            },
-            unsubs
-        ));
+        // Only the videos in the teacher's own subjects — that is all the
+        // dashboard renders, and it is what they may edit or delete.
+        promises.push(...subscribeScopedVideos(user));
+
+        // NOTE: no progress listener. The teacher dashboard's only use of
+        // progress was a view count per video, which now reads the denormalised
+        // video.views counter instead. Subscribing here meant downloading the
+        // entire progress collection on every teacher login.
 
     // ── STUDENT-only listeners ────────────────────────────────
     } else if (user.role === 'student') {
-        // All videos (student needs to see videos for their subjects)
-        promises.push(waitForSnapshot(
-            db.collection(COLLECTIONS.VIDEOS),
-            snap => {
-                _cache.videos = snap.docs.map(docToObj);
-                // Refresh student dashboard when videos arrive (needed for lesson counts)
-                if (typeof StudentPage !== 'undefined' && document.getElementById('student-dashboard-wrapper')) {
-                    StudentPage.renderSubjects();
-                }
-            },
-            unsubs
-        ));
+        // Only the videos in the subjects this student is assigned.
+        promises.push(...subscribeScopedVideos(user));
         // Only this student's progress (not all students')
         promises.push(waitForSnapshot(
             db.collection(COLLECTIONS.PROGRESS).where('studentId', '==', user.id),
@@ -411,6 +462,7 @@ const store = {
             try { unsub(); } catch(e) {}
         });
         _cache.listeners = [];
+        releaseScopedVideoSubs(); // subject-scoped video listeners live outside _cache.listeners
         console.log('[Store] All listeners detached.');
     },
 
