@@ -39,16 +39,12 @@ const App = {
                     await store.fetchUserByUid(fbUser.uid);
                 }
 
-                const user = auth.getCurrentUser();
-                if (user) {
-                    // lastLoginAt / lastActiveAt are stamped by
-                    // auth.enforceSingleSession() in the same write that locks the
-                    // session. Calling store.updateUserLogin() here as well meant
-                    // two writes to the same document on every page load, and
-                    // every write to a user doc is pushed back to each listener
-                    // watching it.
-                    this.setupActivityTracking(user.id);
-                }
+                // NOTE: nothing role- or profile-dependent belongs in this
+                // handler. It returns early for the whole of auth.login(), which
+                // holds auth.isMigrating, so on a fresh form login none of it
+                // runs. lastLoginAt / lastActiveAt are stamped by
+                // enforceSingleSession(), and activity tracking is started from
+                // _renderAuthState(), which runs on every path.
             } else {
                 this._renderedUserId = null; // signed out — next login must render fresh
             }
@@ -339,6 +335,16 @@ const App = {
                     await store.fetchUserByUid(fbUser.uid);
                 }
                 await auth.enforceSingleSession(fbUser.uid);
+
+                // Started here rather than in onAuthStateChanged: that handler
+                // returns early while auth.isMigrating is set, and login() holds
+                // that flag for its whole duration, so a fresh form login never
+                // started tracking at all. lastActiveAt then stayed frozen at the
+                // login time for that entire session, which made "Last Active" in
+                // the admin console a duplicate of "Last Login". This runs on
+                // every path, and setupActivityTracking() is idempotent.
+                const profile = auth.getCurrentUser();
+                if (profile) this.setupActivityTracking(profile.id);
             }
 
             viewLogin.classList.remove('active');
